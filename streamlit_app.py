@@ -1,6 +1,8 @@
 import math
 import json
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -32,6 +34,62 @@ def load_comparison_timings():
         return json.loads(comparison_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def run_live_training_comparison(server_url, dataset_zip, base_model, epochs, imgsz, batch):
+    command = [
+        sys.executable,
+        "-u",
+        "run_weight_jobs.py",
+        "--server",
+        server_url.rstrip("/"),
+        "--dataset-zip",
+        str(dataset_zip),
+        "--base-model",
+        base_model,
+        "--epochs",
+        str(epochs),
+        "--imgsz",
+        str(imgsz),
+        "--batch",
+        str(batch),
+    ]
+    process = subprocess.Popen(
+        command,
+        cwd=Path(__file__).resolve().parent,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_lines = []
+    started_at = time.perf_counter()
+    status_box = st.empty()
+    log_box = st.empty()
+
+    while process.poll() is None:
+        line = process.stdout.readline()
+        if line:
+            output_lines.append(line.rstrip())
+        elapsed = time.perf_counter() - started_at
+        phase = output_lines[-1] if output_lines else "Starting training comparison..."
+        status_box.info(f"Live training: {elapsed:.1f} seconds\n\n{phase}")
+        log_box.code("\n".join(output_lines[-12:]))
+        time.sleep(0.2)
+
+    remaining = process.stdout.read()
+    if remaining:
+        output_lines.extend(remaining.splitlines())
+    elapsed = time.perf_counter() - started_at
+    log_box.code("\n".join(output_lines[-20:]))
+
+    if process.returncode != 0:
+        status_box.error(f"Training comparison failed after {elapsed:.1f} seconds.")
+        st.error("\n".join(output_lines[-10:]))
+        return False
+
+    status_box.success(f"Training comparison completed in {elapsed:.1f} seconds.")
+    return True
 
 def extract_job_id(weight_path):
     if not weight_path:
@@ -163,6 +221,35 @@ def evaluate(weight_path, data_yaml, imgsz, batch, device, conf, iou):
 
 st.title("🚀 Federated GPU Weight Comparison")
 
+st.subheader("Live Training Comparison")
+st.caption("The runner measures both jobs automatically. Keep one worker active for the first run and both workers active for the second run.")
+live_server = st.text_input("Coordinator URL", value="http://127.0.0.1:8000")
+live_dataset = st.text_input("Training Dataset ZIP", value="strawberry_dataset.zip")
+live_model = st.text_input("Training Base Model", value="yolov8n-obb.pt")
+live_col1, live_col2, live_col3 = st.columns(3)
+with live_col1:
+    live_epochs = st.number_input("Training Rounds", min_value=1, max_value=1000, value=2)
+with live_col2:
+    live_imgsz = st.number_input("Training Image Size", min_value=32, max_value=4096, value=512)
+with live_col3:
+    live_batch = st.number_input("Per-worker Batch", min_value=1, max_value=128, value=2)
+
+if st.button("Start Live Training Comparison"):
+    if not Path(live_dataset).exists():
+        st.error(f"Dataset ZIP not found: {live_dataset}")
+    elif not Path(live_model).exists():
+        st.error(f"Base model not found: {live_model}")
+    else:
+        run_live_training_comparison(
+            live_server,
+            live_dataset,
+            live_model,
+            live_epochs,
+            live_imgsz,
+            live_batch,
+        )
+        st.rerun()
+
 weights = list_weight_files()
 
 if not weights:
@@ -194,21 +281,17 @@ device = st.selectbox("Device", ["cpu", "0"])
 # Training Time + Labels
 # ==============================
 
-st.subheader("⏱ Training Time Input")
+st.subheader("⏱ Measured Training Time")
 
 col_t1, col_t2 = st.columns(2)
 
 with col_t1:
-    train_time_1 = st.number_input(
-        "Training Time A (seconds)",
-        value=float(timing_record.get("one_worker_seconds", 155.0)),
-    )
+    train_time_1 = float(timing_record.get("one_worker_seconds", 0.0))
+    st.metric("1-worker time", f"{train_time_1:.2f} seconds" if train_time_1 else "Not measured")
 
 with col_t2:
-    train_time_2 = st.number_input(
-        "Training Time B (seconds)",
-        value=float(timing_record.get("two_worker_seconds", 145.0)),
-    )
+    train_time_2 = float(timing_record.get("two_worker_seconds", 0.0))
+    st.metric("2-worker time", f"{train_time_2:.2f} seconds" if train_time_2 else "Not measured")
 
 if timing_record:
     st.caption("Loaded measured timings from weights/comparison.json.")
