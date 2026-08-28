@@ -1,10 +1,8 @@
-# Local GPU Scheduler MVP
+# Gradmesh-v3
 
-This project is now a terminal-first GPU allocation and batching demo that you can run on a LAN.
+Gradmesh-v3 coordinates YOLO training across NVIDIA GPUs connected over a local network. The host coordinates jobs and aggregates model weights; supplier laptops contribute GPU compute through a lightweight worker.
 
-Current LAN IP on this machine: `10.62.184.114`
-
-Use that IP in the commands below when your friends connect from the same Wi-Fi or Ethernet network.
+Find the host laptop's LAN IPv4 address with `ipconfig`, then use that address wherever this README says `HOST_IP`.
 
 It includes:
 - A coordinator server in [server.py](server.py) that tracks GPU nodes, batches compatible requests, and applies simple allocation rules
@@ -12,7 +10,29 @@ It includes:
 - A CLI client in [client.py](client.py) for discovery, joining, job submission, and status checks
 - A browser dashboard in [dashboard.html](dashboard.html) that is optional and not needed for the main flow
 
-For the two-laptop setup, use the deployment guides in [host](host/README.md) and [gpu_supplier](gpu_supplier/README.md). They are launch guides around the shared implementation, not separate copies of the coordinator and worker logic.
+For the two-laptop setup, start with the deployment guides in [host](host/README.md) and [gpu_supplier](gpu_supplier/README.md). The host keeps the fixed strawberry dataset and model; the supplier only runs the worker and receives its shard and checkpoint from the host.
+
+## Two-Laptop Quick Start
+
+On the host laptop:
+
+```powershell
+New-NetFirewallRule -DisplayName "GradMesh Coordinator 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+On the supplier laptop, after installing `requirements.txt`:
+
+```powershell
+python test_cuda.py
+python worker.py --server-url http://HOST_IP:8000 --name gpu-supplier --max-batch-size 2
+```
+
+Verify the supplier appears on the host:
+
+```powershell
+python client.py discover --server http://127.0.0.1:8000
+```
 
 ## Local Architecture
 
