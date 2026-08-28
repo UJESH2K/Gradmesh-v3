@@ -1,278 +1,557 @@
-# Gradmesh-v3
+# GradMesh
 
-Gradmesh-v3 coordinates YOLO training across NVIDIA GPUs connected over a local network. The host coordinates jobs and aggregates model weights; supplier laptops contribute GPU compute through a lightweight worker.
+> **Collaborative GPU orchestration for distributed AI training over a
+> local network.**
 
-Find the host laptop's LAN IPv4 address with `ipconfig`, then use that address wherever this README says `HOST_IP`.
+GradMesh turns multiple consumer GPUs on different machines into a
+coordinated training cluster. One machine acts as the **Coordinator**
+--- the control-plane "brain" --- while other machines run lightweight
+**Worker Agents** that contribute GPU compute.
 
-It includes:
-- A coordinator server in [server.py](server.py) that tracks GPU nodes, batches compatible requests, and applies simple allocation rules
-- Worker agents in [worker.py](worker.py) that register local GPU capacity, pull batches, run batched inference, and report results
-- A CLI client in [client.py](client.py) for discovery, joining, job submission, and status checks
-- A browser dashboard in [dashboard.html](dashboard.html) that is optional and not needed for the main flow
+The current prototype focuses on **synchronized YOLO training across
+NVIDIA GPUs on a LAN**. The coordinator handles worker registration, job
+creation, dataset sharding, round scheduling, health monitoring, weight
+aggregation, and recovery. Workers perform the actual model training on
+their local GPUs.
 
-For the two-laptop setup, start with the deployment guides in [host](host/README.md) and [gpu_supplier](gpu_supplier/README.md). The host keeps the fixed strawberry dataset and model; the supplier only runs the worker and receives its shard and checkpoint from the host.
+The long-term research direction is a decentralized GPU marketplace, but
+the current implementation deliberately focuses on validating the
+coordinator → worker → synchronized-training pipeline first.
 
-## Two-Laptop Quick Start
+## Architecture
 
-On the host laptop:
+``` text
+                    USER / CLI
+                        |
+                        v
+              +-------------------+
+              |     COORDINATOR   |
+              |     FastAPI       |
+              |-------------------|
+              | Job Manager       |
+              | Scheduler         |
+              | Worker Registry   |
+              | Health Monitor    |
+              | Round Barrier     |
+              | Aggregator        |
+              +---------+---------+
+                        |
+             +----------+----------+
+             |          |          |
+             v          v          v
+          Worker 1   Worker 2   Worker N
+             |          |          |
+             v          v          v
+           GPU 1      GPU 2      GPU N
+             |          |          |
+             +----------+----------+
+                        |
+                 synchronized rounds
+                        |
+                        v
+                  Final Weights
+```
 
-```powershell
+The coordinator CPU is responsible for **control and orchestration**.
+GPUs perform the expensive neural-network computation.
+
+## Components
+
+### Coordinator --- `server.py`
+
+Central control plane responsible for worker registration, discovery,
+heartbeats, job creation, dataset sharding, round scheduling, leases,
+aggregation, status, metrics, and recovery.
+
+### Worker --- `worker.py`
+
+Runs on a GPU machine. It detects local GPU/runtime information,
+registers with the coordinator, receives a shard and checkpoint, trains
+locally, uploads the resulting state, and waits for the next round.
+
+### CLI --- `client.py`
+
+Provides discovery, worker joining, job submission, and status
+operations without requiring the browser dashboard.
+
+### Training --- `run_weight_jobs.py` / `federated_training.py`
+
+Runs the controlled YOLO experiments and training/aggregation helpers.
+
+### Dashboard --- `dashboard.html`
+
+Optional visual control surface. It is not the training engine; the
+coordinator and workers perform the actual training workflow.
+
+## Distributed Training Model
+
+The current implementation uses **round-synchronized training**, not
+step-level PyTorch DDP.
+
+``` text
+Coordinator
+     |
+     +---- shard 1 ----> Worker 1 ----> GPU 1
+     |
+     +---- shard 2 ----> Worker 2 ----> GPU 2
+     |
+     +---- shard N ----> Worker N ----> GPU N
+                                      |
+                                      v
+                              Local training
+                                      |
+                                      v
+                              Updated weights
+                                      |
+              <-----------------------+
+              |
+              v
+       Coordinator aggregation
+              |
+              v
+        Global model state
+              |
+              v
+          Next round
+```
+
+Workers train one local epoch per round, return their model state, and
+the coordinator performs **FedAvg-style weighted state-dict averaging**
+before beginning the next round.
+
+> **Important:** GradMesh currently uses FastAPI/HTTP as the
+> orchestration and synchronization layer. It is not PyTorch DDP. For
+> true step-level gradient synchronization, PyTorch Distributed with
+> `torchrun` and an appropriate backend such as NCCL should be used.
+
+## GPU and CUDA
+
+The current prototype primarily targets NVIDIA GPUs.
+
+PyTorch checks CUDA availability with:
+
+``` python
+torch.cuda.is_available()
+```
+
+and can select:
+
+``` python
+device = torch.device("cuda")
+```
+
+The execution path is:
+
+``` text
+Python → PyTorch → CUDA Runtime → NVIDIA Driver → GPU / VRAM
+```
+
+Python coordinates the work; optimized PyTorch/CUDA kernels execute the
+heavy tensor operations on the GPU.
+
+Future worker backends may support AMD/ROCm or Apple Silicon/MPS, but
+the first implementation should remain focused on NVIDIA/CUDA for
+predictable benchmarking.
+
+## LAN Setup
+
+### Host
+
+Find the host's private LAN IPv4:
+
+``` powershell
+ipconfig
+```
+
+Allow port 8000 in an Administrator PowerShell:
+
+``` powershell
 New-NetFirewallRule -DisplayName "GradMesh Coordinator 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
+```
+
+Start the coordinator:
+
+``` powershell
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
-On the supplier laptop, after installing `requirements.txt`:
+### Second Laptop
 
-```powershell
-python test_cuda.py
-python worker.py --server-url http://HOST_IP:8000 --name gpu-supplier --max-batch-size 2
-```
+Activate the environment and install dependencies:
 
-Verify the supplier appears on the host:
-
-```powershell
-python client.py discover --server http://127.0.0.1:8000
-```
-
-## Local Architecture
-
-1. A client submits a job with `text`, `model_name`, `adapter_name`, `priority`, and `batching_mode`.
-2. The coordinator splits the text into micro tasks.
-3. Workers register their local GPU memory and max batch size using the join endpoint.
-4. When a worker asks for work, the coordinator selects a compatible batch using the model/adapter cache key and the node's memory budget.
-5. The worker processes the batch in one pass and submits a batch result list.
-6. The coordinator aggregates task outputs back into the job result.
-7. If a node stops heartbeating, its batch is re-queued after the lease timeout.
-
-## Allocation Logic
-
-The scheduler uses simple but useful rules for a local demo:
-- Prefer compatible nodes that already declare the requested model in `preferred_models`
-- Limit batch size by `batching_mode` and node `max_batch_size`
-- Respect the node's advertised GPU memory budget
-- Re-queue stale batches when heartbeats stop
-
-This gives you a concrete architecture to explain in a demo without pretending to be a full production cluster.
-
-## Fast Start
-
-If you only want the shortest possible path, do this:
-
-1. Start the coordinator on your machine.
-
-```powershell
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
-```
-
-2. Have your friend join from their machine.
-
-```powershell
-python client.py join --server http://10.62.184.114:8000 --gpu-name "NVIDIA RTX 4090" --display-name "friend-pc" --run
-```
-
-3. Submit a job from your machine.
-
-```powershell
-python client.py submit --server http://10.62.184.114:8000 --text "this is a distributed gpu system demo" --model-name demo-model --batching-mode balanced
-```
-
-If you want to see who is connected, run:
-
-```powershell
-python client.py discover --server http://10.62.184.114:8000
-```
-
-## LAN Join Flow
-
-If your friends are on the same Wi-Fi or Ethernet network, the flow is:
-
-1. You start the coordinator on your machine.
-2. They point their terminal at your machine's LAN IP.
-3. They run the join command to advertise their GPU.
-4. Your scheduler starts handing their machine batches.
-
-Use `python client.py discover --server http://YOUR_IP:8000` to show the join endpoint and the worker command.
-
-## Endpoints
-
-- `GET /network`
-- `POST /join`
-- `POST /register_node`
-- `POST /heartbeat`
-- `POST /submit_job`
-- `GET /get_batch/{node_id}`
-- `POST /submit_batch_result`
-- `GET /job_status/{job_id}`
-- `GET /nodes`
-- `GET /metrics`
-
-## Setup on Windows
-
-1. Activate your virtual environment:
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-2. Install dependencies:
-
-```powershell
+``` powershell
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-## Run Locally
+Check CUDA:
 
-1. Start the coordinator:
-
-```powershell
-uvicorn server:app --host 127.0.0.1 --port 8000 --reload
-```
-
-If you want friends to connect from the same network, use your LAN IP instead of `127.0.0.1`:
-
-```powershell
-uvicorn server:app --host 0.0.0.0 --port 8000 --reload
-```
-
-2. Discover the join endpoint:
-
-```powershell
-python client.py discover --server http://127.0.0.1:8000
-```
-
-3. Join a worker from another terminal or another machine on the LAN:
-
-```powershell
-python client.py join --server http://YOUR_IP:8000 --gpu-name "NVIDIA RTX 4090" --display-name "friend-pc" --run
-```
-
-4. Submit a job:
-
-```powershell
-python client.py submit --server http://127.0.0.1:8000 --text "this is a distributed gpu system demo" --model-name demo-model --batching-mode balanced
-```
-
-## Worker Mode
-
-If you want a worker process without the CLI wrapper, run:
-
-```powershell
-python worker.py
-```
-
-## Testing the Allocation Path
-
-1. Start 2 workers with different `--gpu-memory-mb` or `--max-batch-size` values.
-2. Submit several jobs quickly with the same `--model-name`.
-3. Watch the coordinator batch compatible tasks together.
-4. Check `python client.py discover --server http://YOUR_IP:8000` or `GET /metrics` to see active batches and allocated memory.
-
-## Notes
-
-
-## Synchronized Training (Implemented)
-
-This repo currently supports synchronized multi-worker training with a coordinator barrier per round:
-
-1. Coordinator creates one shard batch per worker for the current round.
-2. Every worker trains exactly one local epoch on its shard.
-3. Workers submit updated weights.
-4. Coordinator averages all returned weights (FedAvg-style state-dict averaging).
-5. Next round starts only after all shard batches for the current round are complete.
-
-This keeps workers synchronized at round boundaries and prevents model drift across workers.
-
-### Important
-
-- FastAPI is used as a job orchestrator and aggregation barrier.
-- This is round-synchronized training, not per-step DDP all-reduce.
-- For true step-level gradient sync, use PyTorch DDP (`torchrun`, NCCL) directly.
-
-## Two-Laptop YOLO Training
-
-The training coordinator uses HTTP polling and a round barrier. It is not PyTorch DDP: each worker trains one local epoch on its shard, uploads its state dict, and the coordinator averages the returned weights before starting the next round.
-
-### Host laptop
-
-Find the host LAN address with `ipconfig`, then allow the coordinator port through Windows Firewall (run PowerShell as Administrator):
-
-```powershell
-New-NetFirewallRule -DisplayName "GradMesh Coordinator 8000" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow
-```
-
-Start the coordinator from this project directory. `0.0.0.0` is required so another laptop can reach it:
-
-```powershell
-uvicorn server:app --host 0.0.0.0 --port 8000
-```
-
-Confirm locally:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/network
-```
-
-### Second laptop
-
-Install the same `requirements.txt`, then verify that its NVIDIA driver and PyTorch can see the RTX 3050 or GTX 1650:
-
-```powershell
+``` powershell
 python test_cuda.py
 ```
 
-Replace `HOST_IP` with the host laptop's IPv4 address. The worker automatically downloads `yolov8n.pt` or `yolov8n-obb.pt` from the coordinator, so the checkpoint does not need to be copied manually:
+Start the worker:
 
-```powershell
-python worker.py --server-url http://HOST_IP:8000 --name remote-3050 --max-batch-size 2
+``` powershell
+python worker.py --server-url http://HOST_IP:8000 --name remote-gpu --max-batch-size 2
 ```
 
-On the host, start a second worker if the host GPU should participate too:
+Example:
 
-```powershell
-python worker.py --server-url http://127.0.0.1:8000 --name host-1650 --max-batch-size 2
+``` powershell
+python worker.py --server-url http://192.168.1.25:8000 --name remote-3050 --max-batch-size 2
 ```
 
-Check that both nodes are active before submitting training:
+If the host GPU should participate, start another worker on the host:
 
-```powershell
+``` powershell
+python worker.py --server-url http://127.0.0.1:8000 --name host-gpu --max-batch-size 2
+```
+
+Check workers:
+
+``` powershell
 python client.py discover --server http://127.0.0.1:8000
 ```
 
-For the first test, use conservative settings for the 4 GB GTX 1650. The `worker_count` must equal the number of active workers, and `batch` is the per-worker batch size, not the combined batch:
+Test connectivity from the second laptop:
 
-```powershell
-python run_weight_jobs.py --server http://127.0.0.1:8000 --dataset-zip strawberry_dataset.zip --base-model yolov8n-obb.pt --epochs 2 --imgsz 512 --batch 2
-```
-
-Create the zip first if it does not exist:
-
-```powershell
-Compress-Archive -Path strawberry_dataset_extract\* -DestinationPath strawberry_dataset.zip -Force
-```
-
-The 1-worker run is completed first, then the 2-worker run. Both timings are wall-clock times measured by `run_weight_jobs.py`; include dataset transfer, shard download, training, weight upload, and synchronization. Do not compare runs with different `epochs`, `imgsz`, `batch`, model, or dataset.
-
-If the remote worker does not appear, test the port from the second laptop:
-
-```powershell
+``` powershell
 Test-NetConnection HOST_IP -Port 8000
 ```
 
-If `TcpTestSucceeded` is false, fix the Windows Firewall rule or ensure both laptops are on the same non-isolated Wi-Fi network. If it is true but the worker fails, inspect its terminal for the first HTTP or CUDA error.
+Use the host's **private LAN IPv4**, not its public internet address,
+for the normal same-network setup.
 
-## 10-Epoch Comparison Command
+## YOLO Dataset
 
-Use this command to run 1-worker and 2-worker training sequentially, save both final weights, and print timing:
+A typical dataset ZIP should contain:
 
-```powershell
+``` text
+dataset/
+├── train/
+│   ├── images/
+│   └── labels/
+├── valid/
+│   ├── images/
+│   └── labels/
+└── data.yaml
+```
+
+For OBB training, the annotation format and selected YOLO OBB model must
+match.
+
+Always validate the dataset with a single-GPU run before using it for
+the distributed benchmark.
+
+## Two-GPU Experiment
+
+The main proof-of-concept compares:
+
+### Test 1 --- Single GPU
+
+``` text
+Coordinator → GPU 1
+```
+
+### Test 2 --- GradMesh
+
+``` text
+              Coordinator
+               /       \
+              v         v
+            GPU 1     GPU 2
+```
+
+Keep these identical between runs:
+
+-   dataset
+-   model
+-   image size
+-   batch size
+-   epochs
+-   optimizer/hyperparameters
+-   evaluation procedure
+
+Measure:
+
+-   total wall-clock time
+-   epoch time
+-   training/validation loss
+-   mAP or task-specific accuracy
+-   GPU utilization
+-   VRAM usage
+-   network transfer
+-   synchronization time
+-   worker completion time
+
+Do not assume two GPUs will produce exactly 2× speedup. Communication,
+serialization, synchronization, and stragglers create overhead.
+
+## Example Training
+
+``` powershell
+python run_weight_jobs.py --server http://127.0.0.1:8000 --dataset-zip strawberry_dataset.zip --base-model yolov8n-obb.pt --epochs 2 --imgsz 512 --batch 2
+```
+
+A larger controlled comparison:
+
+``` powershell
 python run_weight_jobs.py --server http://127.0.0.1:8000 --dataset-zip strawberry_dataset.zip --base-model yolov8n.pt --epochs 10 --imgsz 640 --batch 4
 ```
 
-Output files are saved as:
+The batch size is the **per-worker batch size** in the current design.
 
-- `weights/weighted_with_one_<job_id>.pt`
-- `weights/weighted_with_two_<job_id>.pt`
+## Output Structure
 
-#   g p u - i n t e r s e c t i o n 
- 
- 
+``` text
+outputs/
+├── Test_01/
+│   ├── single_gpu/
+│   │   ├── weights/
+│   │   │   ├── best.pt
+│   │   │   └── last.pt
+│   │   ├── metrics.json
+│   │   ├── training_log.csv
+│   │   └── system_metrics.csv
+│   │
+│   └── gradmesh_2gpu/
+│       ├── weights/
+│       │   ├── best.pt
+│       │   └── last.pt
+│       ├── metrics.json
+│       ├── training_log.csv
+│       └── system_metrics.csv
+│
+└── comparison/
+    ├── comparison.csv
+    ├── comparison.json
+    └── plots/
+        ├── training_time.png
+        ├── loss.png
+        ├── map.png
+        └── gpu_utilization.png
+```
+
+Streamlit can later read these outputs and visualize the comparison
+without controlling the training process.
+
+## Mathematical Model
+
+### Dataset Allocation
+
+``` text
+D = union(D_i)
+|D_i| = (C_i / sum(C_j)) |D|
+```
+
+where `C_i` is normalized compute capability.
+
+### Worker Scheduling Score
+
+``` text
+G_i = alpha*C_i + beta*M_i + gamma*H_i + lambda*T_i - delta*L_i
+W* = argmax(G_i)
+```
+
+This is a proposed scheduling heuristic combining compute capability,
+memory, health, reliability, and latency.
+
+### Weighted Aggregation
+
+``` text
+w^(t+1) = sum_i [ |D_i| / |D| * w_i^(t+1) ]
+```
+
+This is a FedAvg-style aggregation approach rather than a newly invented
+optimization algorithm.
+
+### Dynamic Rebalancing
+
+``` text
+R_t = |D| - sum_i |D_i_completed|
+
+D_i' = [ G_i / sum_(j in A) G_j ] R_t
+```
+
+This represents redistribution of unfinished work among active workers.
+
+### Performance
+
+``` text
+Speedup = T_single / T_distributed
+Efficiency = Speedup / N
+Accuracy Difference = |A_single - A_distributed|
+```
+
+## API Endpoints
+
+``` text
+GET  /network
+POST /join
+POST /register_node
+POST /heartbeat
+
+POST /submit_job
+GET  /get_batch/{node_id}
+POST /submit_batch_result
+
+GET  /job_status/{job_id}
+GET  /nodes
+GET  /metrics
+```
+
+The exact request/response schema in `server.py` is the source of truth.
+
+## Project Structure
+
+``` text
+GradMesh/
+├── server.py
+├── worker.py
+├── client.py
+├── run_weight_jobs.py
+├── federated_training.py
+├── dashboard.html
+├── test_cuda.py
+├── requirements.txt
+├── outputs/
+├── host/
+└── gpu_supplier/
+```
+
+## Current Status
+
+### Implemented
+
+-   [x] FastAPI coordinator
+-   [x] Worker registration
+-   [x] Worker discovery
+-   [x] Heartbeat monitoring
+-   [x] Job submission
+-   [x] Dataset sharding
+-   [x] Worker-side GPU training
+-   [x] Round-based synchronization
+-   [x] FedAvg-style weight aggregation
+-   [x] CLI workflow
+-   [x] Browser dashboard
+-   [x] LAN worker connectivity
+-   [x] Training output handling
+
+### Validation in Progress
+
+-   [ ] Reliable two-machine YOLO benchmark
+-   [ ] Single-GPU vs 2-GPU speedup
+-   [ ] Accuracy equivalence
+-   [ ] Communication overhead
+-   [ ] Heterogeneous GPU allocation
+-   [ ] Worker failure and recovery
+-   [ ] Dynamic rebalancing
+
+### Future Research
+
+-   [ ] True step-level gradient synchronization
+-   [ ] gRPC internal communication
+-   [ ] NCCL / PyTorch Distributed integration
+-   [ ] Heterogeneous scheduling
+-   [ ] Gradient/update compression
+-   [ ] Straggler mitigation
+-   [ ] Secure worker isolation
+-   [ ] NAT traversal
+-   [ ] Worker verification
+-   [ ] Decentralized marketplace
+-   [ ] Reputation and settlement
+-   [ ] Privacy-preserving training
+
+## Limitations
+
+GradMesh is currently a **research prototype**, not a production GPU
+marketplace.
+
+Important limitations include:
+
+1.  HTTP/round synchronization is slower than specialized GPU
+    communication.
+2.  Model-weight aggregation is not equivalent to step-level DDP
+    gradient synchronization.
+3.  Heterogeneous GPUs can create stragglers.
+4.  Large checkpoints and updates can create network overhead.
+5.  Worker trust and malicious-result verification are not solved in the
+    prototype.
+6.  Internet deployment requires additional security and NAT traversal
+    work.
+7.  The first implementation is primarily designed for NVIDIA/CUDA
+    environments.
+
+## Research Objective
+
+The central question is:
+
+> **Can heterogeneous, independently owned consumer GPUs be coordinated
+> over an ordinary network to reduce deep-learning training time while
+> maintaining comparable model quality, without requiring
+> datacenter-grade infrastructure?**
+
+The initial experiment is deliberately controlled:
+
+``` text
+                    SAME DATASET
+                         |
+             +-----------+-----------+
+             |                       |
+             v                       v
+       Single GPU              GradMesh 2 GPU
+             |                       |
+             v                       v
+         YOLO Train               YOLO Train
+             |                       |
+             +-----------+-----------+
+                         |
+                         v
+                    COMPARISON
+                         |
+              +----------+----------+
+              |          |          |
+              v          v          v
+             Time       mAP       Overhead
+```
+
+The objective is to measure the real trade-off between computation,
+communication, synchronization, and model quality.
+
+## Long-Term Vision
+
+``` text
+LAN GPU Collaboration
+          |
+          v
+Heterogeneous GPU Scheduling
+          |
+          v
+Fault-Aware Distributed Training
+          |
+          v
+Remote GPU Providers
+          |
+          v
+Decentralized GPU Marketplace
+          |
+          v
+Collaborative AI Compute Network
+```
+
+> **GradMesh aims to make unused GPU compute accessible, coordinated,
+> and useful without requiring every user to own a dedicated high-end
+> machine.**
+
+## License
+
+Add the project's intended license before public release.
+
+## Disclaimer
+
+GradMesh is a research and engineering prototype. Performance depends on
+GPU capability, network bandwidth/latency, model size, dataset size,
+synchronization strategy, and workload characteristics. Benchmark
+results should be reported with the exact hardware, software, dataset,
+and training configuration used.
