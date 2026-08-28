@@ -1,0 +1,11 @@
+{
+  "one_worker_seconds": 35.048,
+  "two_worker_seconds": 50.174,
+  "speedup": 0.699,
+  "one_worker_job_id": "b2bdb786-4ae4-46f0-b27b-ed1545064b79",
+  "two_worker_job_id": "e482879c-fb07-4dbe-b9ac-f8f6ca14d754",
+  "base_model": "yolov8n.pt",
+  "epochs": 2,
+  "imgsz": 512,
+  "batch": 2
+}

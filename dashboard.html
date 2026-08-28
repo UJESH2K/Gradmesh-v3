@@ -1,1192 +1,852 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Decentralized GPU - Dashboard</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPU Federation Console — Training Comparison</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg:#0B1016; --panel:#121924; --panel-raised:#17202C; --border:#232D3B;
+    --text:#E7EAEE; --text-dim:#8993A1; --text-faint:#5B6575;
+    --amber:#E3A143; --amber-dim:#8A6529; --copper:#B8703F; --teal:#49C6B5;
+    --red:#E2604F; --green:#5BC98B;
+    --mono:'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --radius:3px;
+  }
+  html[data-theme="light"]{
+    --bg:#EBEEF1; --panel:#FFFFFF; --panel-raised:#F5F7F9; --border:#D6DCE2;
+    --text:#171C22; --text-dim:#5B6572; --text-faint:#8993A1;
+    --amber:#B96E12; --amber-dim:#D9A967; --copper:#8F4F22; --teal:#0F8E7D;
+    --red:#B8402C; --green:#2C8F5C;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+       -webkit-font-smoothing:antialiased; transition:background .25s ease, color .25s ease;}
+  ::selection{background:var(--amber); color:#0B1016;}
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
-        }
+  /* ===== Top bar ===== */
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:14px 24px; border-bottom:1px solid var(--border);
+    background:linear-gradient(180deg, var(--panel), var(--bg));
+    position:sticky; top:0; z-index:20;
+  }
+  .brand{display:flex; align-items:baseline; gap:10px;}
+  .brand .mark{
+    font-family:var(--mono); font-weight:700; font-size:13px; letter-spacing:.14em;
+    color:var(--amber); border:1px solid var(--amber-dim); padding:3px 7px; border-radius:var(--radius);
+  }
+  .brand .title{font-family:var(--mono); font-weight:600; font-size:15px; letter-spacing:.02em;}
+  .brand .subtitle{font-family:var(--mono); font-size:11px; color:var(--text-faint); letter-spacing:.08em;}
+  .top-right{display:flex; align-items:center; gap:16px;}
+  .conn{display:flex; align-items:center; gap:7px; font-family:var(--mono); font-size:11.5px; color:var(--text-dim);}
+  .dot{width:7px; height:7px; border-radius:50%; background:var(--text-faint); box-shadow:0 0 0 3px transparent;}
+  .dot.ok{background:var(--green); box-shadow:0 0 0 3px rgba(91,201,139,.18);}
+  .dot.bad{background:var(--red); box-shadow:0 0 0 3px rgba(226,96,79,.18);}
+  .theme-toggle{
+    font-family:var(--mono); font-size:11px; letter-spacing:.06em; color:var(--text-dim);
+    background:var(--panel-raised); border:1px solid var(--border); border-radius:20px;
+    padding:5px 12px; cursor:pointer; display:flex; align-items:center; gap:6px;
+  }
+  .theme-toggle:hover{border-color:var(--amber-dim); color:var(--text);}
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+  /* ===== Layout ===== */
+  .layout{display:grid; grid-template-columns:308px 1fr; gap:0; align-items:start;}
+  @media (max-width:920px){ .layout{grid-template-columns:1fr;} }
 
-        header {
-            text-align: center;
-            color: white;
-            margin-bottom: 50px;
-        }
+  .sidebar{
+    border-right:1px solid var(--border); padding:20px; position:sticky; top:57px;
+    height:calc(100vh - 57px); overflow-y:auto;
+  }
+  @media (max-width:920px){ .sidebar{position:static; height:auto; border-right:none; border-bottom:1px solid var(--border);} }
 
-        header h1 {
-            font-size: 36px;
-            font-weight: 700;
-            margin-bottom: 10px;
-        }
+  .main{padding:24px; max-width:1180px;}
 
-        header p {
-            font-size: 16px;
-            opacity: 0.9;
-        }
+  .section-label{
+    font-family:var(--mono); font-size:10.5px; letter-spacing:.14em; color:var(--text-faint);
+    text-transform:uppercase; margin:0 0 10px 2px;
+  }
 
-        .tabs {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 30px;
-            justify-content: center;
-        }
+  .field{margin-bottom:14px;}
+  .field label{display:block; font-family:var(--mono); font-size:11px; color:var(--text-dim); margin-bottom:5px; letter-spacing:.03em;}
+  .field input[type=text], .field input[type=number]{
+    width:100%; background:var(--panel-raised); border:1px solid var(--border); color:var(--text);
+    font-family:var(--mono); font-size:12.5px; padding:8px 9px; border-radius:var(--radius); outline:none;
+  }
+  .field input:focus{border-color:var(--amber-dim);}
+  .field-row{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+  .file-drop{
+    border:1px dashed var(--border); border-radius:var(--radius); padding:12px; text-align:center;
+    font-family:var(--mono); font-size:11.5px; color:var(--text-dim); cursor:pointer; background:var(--panel-raised);
+  }
+  .file-drop:hover{border-color:var(--amber-dim); color:var(--text);}
+  .file-drop input{display:none;}
+  .file-name{font-size:11px; color:var(--teal); margin-top:6px; word-break:break-all;}
 
-        .tab-btn {
-            padding: 12px 30px;
-            font-size: 16px;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            background-color: rgba(255, 255, 255, 0.3);
-            color: white;
-            transition: all 0.3s ease;
-            font-weight: 600;
-        }
+  .btn{
+    width:100%; font-family:var(--mono); font-size:12px; letter-spacing:.05em; font-weight:600;
+    padding:10px 12px; border-radius:var(--radius); cursor:pointer; border:1px solid var(--border);
+    background:var(--panel-raised); color:var(--text); margin-bottom:8px;
+  }
+  .btn:hover{border-color:var(--text-faint);}
+  .btn-primary{background:var(--amber); color:#0B1016; border-color:var(--amber);}
+  .btn-primary:hover{filter:brightness(1.08);}
+  .btn:disabled{opacity:.45; cursor:not-allowed;}
+  .hint{font-family:var(--mono); font-size:10.5px; color:var(--text-faint); line-height:1.5; margin-top:2px;}
 
-        .tab-btn:hover {
-            background-color: rgba(255, 255, 255, 0.5);
-        }
+  hr.rule{border:none; border-top:1px solid var(--border); margin:18px 0;}
 
-        .tab-btn.active {
-            background-color: white;
-            color: #667eea;
-        }
+  /* ===== Node strip ===== */
+  .nodes-strip{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:22px;}
+  .node-chip{
+    font-family:var(--mono); font-size:11px; padding:6px 10px; border-radius:20px;
+    border:1px solid var(--border); background:var(--panel); display:flex; align-items:center; gap:6px; color:var(--text-dim);
+  }
+  .node-chip .dot{width:6px; height:6px;}
+  .empty-note{font-family:var(--mono); font-size:11.5px; color:var(--text-faint);}
 
-        .panel {
-            display: none;
-            background: white;
-            border-radius: 12px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            animation: fadeIn 0.3s ease;
-        }
+  /* ===== Departure board ===== */
+  .board{border:1px solid var(--border); border-radius:4px; overflow:hidden; margin-bottom:22px; background:var(--panel);}
+  .board-head, .board-row{
+    display:grid; grid-template-columns:120px 100px 1fr 130px 110px 130px;
+    align-items:center; gap:10px; padding:10px 14px;
+  }
+  .board-head{
+    font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--text-faint); text-transform:uppercase;
+    background:var(--panel-raised); border-bottom:1px solid var(--border);
+  }
+  .board-row{border-bottom:1px solid var(--border); font-family:var(--mono); font-size:12px;}
+  .board-row:last-child{border-bottom:none;}
+  .run-name{font-weight:600; color:var(--text);}
+  .run-name small{display:block; font-weight:400; color:var(--text-faint); font-size:10px; margin-top:2px;}
+  .stage-pill{
+    display:inline-block; padding:3px 9px; border-radius:20px; font-size:10.5px; letter-spacing:.04em;
+    border:1px solid var(--border); color:var(--text-dim);
+  }
+  .stage-pill.idle{color:var(--text-faint);}
+  .stage-pill.active{color:var(--amber); border-color:var(--amber-dim); background:rgba(227,161,67,.08);}
+  .stage-pill.done{color:var(--green); border-color:var(--green); background:rgba(91,201,139,.08);}
+  .stage-pill.failed{color:var(--red); border-color:var(--red); background:rgba(226,96,79,.08);}
+  .stage-detail{color:var(--text-dim); font-size:11px;}
+  .elapsed{
+    font-variant-numeric:tabular-nums; letter-spacing:.03em; background:#000; color:var(--amber);
+    padding:4px 7px; border-radius:3px; display:inline-block; min-width:74px; text-align:center;
+    border:1px solid #000;
+  }
+  html[data-theme="light"] .elapsed{background:#1B1F24; color:#F0B25A;}
+  .dl-link{color:var(--teal); text-decoration:none; font-size:11px;}
+  .dl-link:hover{text-decoration:underline;}
+  .dl-link.disabled{color:var(--text-faint); pointer-events:none;}
 
-        .panel.active {
-            display: block;
-        }
+  /* ===== Log console ===== */
+  .console{
+    background:#05070A; border:1px solid var(--border); border-radius:4px; padding:12px 14px;
+    font-family:var(--mono); font-size:11.5px; color:#9FE6B0; height:170px; overflow-y:auto; margin-bottom:26px;
+    line-height:1.65;
+  }
+  html[data-theme="light"] .console{background:#0E1116; color:#8FE0A2;}
+  .console .t{color:#5B6575;}
+  .console .err{color:#FF8272;}
+  .console .warn{color:#E3A143;}
 
-        @keyframes fadeIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
+  /* ===== Summary + charts ===== */
+  .summary-cards{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:22px;}
+  @media (max-width:640px){ .summary-cards{grid-template-columns:1fr;} }
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:4px; padding:14px 16px;}
+  .card .k{font-family:var(--mono); font-size:10px; letter-spacing:.1em; color:var(--text-faint); text-transform:uppercase;}
+  .card .v{font-family:var(--mono); font-size:22px; font-weight:600; margin-top:6px; color:var(--text);}
+  .card .v.accent{color:var(--amber);}
 
-        .panel h2 {
-            font-size: 28px;
-            margin-bottom: 30px;
-            color: #333;
-        }
+  .panel{background:var(--panel); border:1px solid var(--border); border-radius:4px; padding:18px 20px; margin-bottom:22px;}
+  .panel-title{font-family:var(--mono); font-size:12.5px; font-weight:600; letter-spacing:.03em; margin:0 0 4px 0;}
+  .panel-sub{font-family:var(--mono); font-size:11px; color:var(--text-faint); margin:0 0 16px 0; line-height:1.6;}
 
-        .form-group {
-            margin-bottom: 20px;
-        }
+  .charts-grid{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px;}
+  @media (max-width:800px){ .charts-grid{grid-template-columns:1fr;} }
+  .chart-box{background:var(--panel-raised); border:1px solid var(--border); border-radius:4px; padding:14px;}
+  .chart-box h4{font-family:var(--mono); font-size:11px; color:var(--text-dim); margin:0 0 10px 0; letter-spacing:.03em;}
+  .chart-box canvas{max-height:220px;}
 
-        label {
-            display: block;
-            margin-bottom: 8px;
-            color: #555;
-            font-weight: 600;
-        }
+  table.metrics{width:100%; border-collapse:collapse; font-family:var(--mono); font-size:12px; margin-top:4px;}
+  table.metrics th, table.metrics td{padding:8px 10px; text-align:left; border-bottom:1px solid var(--border);}
+  table.metrics th{color:var(--text-faint); font-weight:500; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;}
+  table.metrics td.num{font-variant-numeric:tabular-nums;}
 
-        input[type="text"],
-        input[type="number"],
-        input[type="file"],
-        select,
-        textarea {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 6px;
-            font-size: 14px;
-            transition: border-color 0.3s;
-        }
+  .insight{font-family:var(--mono); font-size:12.5px; color:var(--text-dim); line-height:1.9; margin-top:10px;}
+  .insight b{color:var(--amber);}
 
-        input[type="text"]:focus,
-        input[type="number"]:focus,
-        select:focus,
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-
-        button {
-            padding: 12px 30px;
-            font-size: 16px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.3s ease;
-        }
-
-        .btn-primary {
-            background-color: #667eea;
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background-color: #5568d3;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-        }
-
-        .btn-primary:disabled {
-            background-color: #ccc;
-            cursor: not-allowed;
-            transform: none;
-        }
-
-        .btn-secondary {
-            background-color: #f0f0f0;
-            color: #333;
-        }
-
-        .btn-secondary:hover {
-            background-color: #e0e0e0;
-        }
-
-        .status-box {
-            background-color: #f8f9fa;
-            border-left: 4px solid #667eea;
-            padding: 15px;
-            margin-top: 20px;
-            border-radius: 6px;
-        }
-
-        .status-label {
-            font-weight: 600;
-            color: #555;
-            margin-bottom: 5px;
-        }
-
-        .status-value {
-            font-size: 16px;
-            color: #333;
-        }
-
-        .progress-box {
-            background: white;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-
-        .progress-title {
-            font-weight: 600;
-            margin-bottom: 15px;
-            color: #333;
-        }
-
-        .progress-bar {
-            width: 100%;
-            height: 10px;
-            background-color: #e0e0e0;
-            border-radius: 5px;
-            overflow: hidden;
-            margin-bottom: 10px;
-        }
-
-        .progress-fill {
-            height: 100%;
-            background-color: #667eea;
-            transition: width 0.3s ease;
-            border-radius: 5px;
-        }
-
-        .progress-text {
-            font-size: 14px;
-            color: #666;
-        }
-
-        .result-box {
-            background-color: #f0f8ff;
-            border: 2px solid #667eea;
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-
-        .result-title {
-            font-weight: 600;
-            color: #667eea;
-            margin-bottom: 10px;
-        }
-
-        .result-text {
-            color: #333;
-            font-size: 16px;
-            line-height: 1.6;
-            word-break: break-word;
-        }
-
-        .node-list {
-            background: white;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 15px;
-            margin-top: 20px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-
-        .node-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 10px;
-            border-bottom: 1px solid #f0f0f0;
-        }
-
-        .node-item:last-child {
-            border-bottom: none;
-        }
-
-        .node-info {
-            flex: 1;
-        }
-
-        .node-name {
-            font-weight: 600;
-            color: #333;
-        }
-
-        .node-gpu {
-            font-size: 12px;
-            color: #999;
-        }
-
-        .node-status {
-            font-size: 12px;
-            font-weight: 600;
-            padding: 4px 12px;
-            border-radius: 20px;
-            background-color: #e0f7e0;
-            color: #2d7a2d;
-        }
-
-        .node-status.inactive {
-            background-color: #ffe0e0;
-            color: #7a2d2d;
-        }
-
-        .message {
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 15px;
-            display: none;
-        }
-
-        .message.show {
-            display: block;
-        }
-
-        .message.success {
-            background-color: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-
-        .message.error {
-            background-color: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-
-        .message.info {
-            background-color: #d1ecf1;
-            color: #0c5460;
-            border: 1px solid #bee5eb;
-        }
-
-        .divider {
-            height: 1px;
-            background-color: #e0e0e0;
-            margin: 30px 0;
-        }
-
-        .form-row {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-        }
-
-        .form-row.three {
-            grid-template-columns: 1fr 1fr 1fr;
-        }
-
-        .metric-grid {
-            display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 14px;
-            margin-top: 18px;
-        }
-
-        .metric-card {
-            background: linear-gradient(180deg, rgba(102, 126, 234, 0.08), rgba(102, 126, 234, 0.02));
-            border: 1px solid rgba(102, 126, 234, 0.18);
-            border-radius: 14px;
-            padding: 16px;
-        }
-
-        .metric-label {
-            font-size: 12px;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            color: #7080a4;
-            margin-bottom: 8px;
-        }
-
-        .metric-value {
-            font-size: 24px;
-            font-weight: 700;
-            color: #18223a;
-            word-break: break-word;
-        }
-
-        .hint {
-            font-size: 13px;
-            color: #5e6a84;
-            line-height: 1.6;
-            margin-top: 8px;
-        }
-
-        @media (max-width: 768px) {
-            .panel {
-                padding: 20px;
-            }
-
-            .form-row {
-                grid-template-columns: 1fr;
-            }
-
-            .metric-grid {
-                grid-template-columns: 1fr;
-            }
-
-            header h1 {
-                font-size: 24px;
-            }
-
-            .tabs {
-                flex-wrap: wrap;
-            }
-        }
-    </style>
+  .footer-note{font-family:var(--mono); font-size:10.5px; color:var(--text-faint); padding:20px 24px 40px; line-height:1.7;}
+</style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>⚡ MeshTrain</h1>
-            <p>LAN-first synchronized training, worker orchestration, and live checkpoint rounds</p>
-        </header>
 
-        <div class="tabs">
-            <button class="tab-btn active" onclick="switchTab('provider', this)">💻 GPU Provider</button>
-            <button class="tab-btn" onclick="switchTab('consumer', this)">📊 Job Consumer</button>
-            <button class="tab-btn" onclick="switchTab('training', this)">🧠 Training Sync</button>
-        </div>
+<div class="topbar">
+  <div class="brand">
+    <span class="mark">GPU-FED</span>
+    <div>
+      <div class="title">Federation Console</div>
+      <div class="subtitle">1-WORKER · 2-WORKER TRAINING COMPARISON</div>
+    </div>
+  </div>
+  <div class="top-right">
+    <div class="conn" id="connLabel"><span class="dot" id="connDot"></span><span>coordinator not checked</span></div>
+    <button class="theme-toggle" id="themeToggle">☾ &nbsp;dark</button>
+  </div>
+</div>
 
-        <!-- GPU Provider Panel -->
-        <div id="provider" class="panel active">
-            <h2>Offer Your GPU</h2>
-            
-            <div id="provider-message" class="message"></div>
+<div class="layout">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="section-label">Coordinator</div>
+    <div class="field">
+      <label>Base URL</label>
+      <input type="text" id="serverUrl" value="http://127.0.0.1:8000">
+    </div>
+    <button class="btn" id="checkBtn">Check connection</button>
 
-            <div class="form-group">
-                <label for="server-url-provider">Server URL</label>
-                <input 
-                    type="text" 
-                    id="server-url-provider" 
-                    placeholder="http://127.0.0.1:8000"
-                    value="http://127.0.0.1:8000"
-                >
-            </div>
+    <hr class="rule">
 
-            <div class="form-group">
-                <label for="gpu-name">GPU Name (Optional)</label>
-                <input 
-                    type="text" 
-                    id="gpu-name" 
-                    placeholder="e.g., NVIDIA RTX 3090, CPU, etc."
-                >
-            </div>
+    <div class="section-label">Training Job</div>
+    <div class="field">
+      <label>Dataset ZIP <span style="color:var(--text-faint);">(auto-fetched, same default as Streamlit)</span></label>
+      <input type="text" id="datasetName" value="strawberry_dataset.zip">
+      <div class="hint">Fetched automatically from the coordinator when you press Compare — nothing to upload. Only change this if your file has a different name.</div>
+    </div>
+    <div class="field">
+      <label>Base model</label>
+      <input type="text" id="baseModel" value="yolov8n.pt">
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Rounds (epochs)</label>
+        <input type="number" id="epochs" value="2" min="1">
+      </div>
+      <div class="field">
+        <label>Image size</label>
+        <input type="number" id="imgsz" value="512" min="32">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Batch / worker</label>
+        <input type="number" id="batch" value="2" min="1">
+      </div>
+      <div class="field">
+        <label>Max images (0=full)</label>
+        <input type="number" id="maxImages" value="20" min="0">
+      </div>
+    </div>
+    <div class="hint">Max images &gt; 0 trims to the first N sorted train images, same as create_limited_dataset_zip / discover_yolo_split_dirs. Set to 0 to send the full ZIP untouched.</div>
 
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="gpu-memory-mb">GPU Memory (MB)</label>
-                    <input 
-                        type="number" 
-                        id="gpu-memory-mb" 
-                        value="24000"
-                        min="1"
-                    >
-                </div>
-                <div class="form-group">
-                    <label for="max-batch-size">Max Batch Size</label>
-                    <input 
-                        type="number" 
-                        id="max-batch-size" 
-                        value="4"
-                        min="1"
-                        max="64"
-                    >
-                </div>
-            </div>
+    <hr class="rule">
 
-            <div class="form-group">
-                <label for="preferred-models">Preferred Models (comma separated)</label>
-                <input 
-                    type="text" 
-                    id="preferred-models" 
-                    placeholder="demo-model, vision-obb"
-                >
-            </div>
+    <button class="btn btn-primary" id="startBtn">▶ Compare</button>
+    <div class="hint" id="startHint">Fetches strawberry_dataset.zip, runs the 1-worker job then the 2-worker job — same sequence as run_weight_jobs.py. Press Enter anywhere in this panel to run it too.</div>
+    <div id="startError" style="display:none; font-family:var(--mono); font-size:11.5px; color:var(--red); background:rgba(226,96,79,.08); border:1px solid var(--red); border-radius:var(--radius); padding:8px 10px; margin-top:8px;"></div>
 
-            <button class="btn-primary" onclick="startWorker()">
-                Start GPU Worker
-            </button>
-            <button class="btn-secondary" id="stop-worker-btn" onclick="stopWorker()" style="display: none; margin-left: 10px;">
-                Stop Worker
-            </button>
+    <hr class="rule">
 
-            <div class="divider"></div>
+    <div class="section-label">Evaluation Results</div>
+    <div class="field">
+      <label>Results JSON URL</label>
+      <input type="text" id="resultsUrl" placeholder="http://127.0.0.1:8000/weights/comparison_results.json">
+    </div>
+    <button class="btn" id="fetchResultsBtn">Fetch evaluation metrics</button>
+    <div class="hint">Precision / recall / mAP come from the server-side YOLO validation pass (comparison_results.json) — a browser can't run that model itself, so point this at wherever the coordinator serves it.</div>
+  </div>
 
-            <h3 style="margin-bottom: 20px;">Active Nodes</h3>
-            <button class="btn-secondary" onclick="refreshNodeList()" style="margin-bottom: 15px;">
-                Refresh Node List
-            </button>
-            <div id="node-list-container" class="node-list">
-                <div style="color: #999; text-align: center; padding: 20px;">
-                    Click "Refresh Node List" to see active nodes
-                </div>
-            </div>
-
-            <div id="provider-status" class="status-box" style="display: none;">
-                <div class="status-label">Worker Status</div>
-                <div class="status-value" id="provider-status-value">Waiting...</div>
-            </div>
-        </div>
-
-        <!-- Job Consumer Panel -->
-        <div id="consumer" class="panel">
-            <h2>Submit a Job</h2>
-
-            <div id="consumer-message" class="message"></div>
-
-            <div class="form-group">
-                <label for="server-url-consumer">Server URL</label>
-                <input 
-                    type="text" 
-                    id="server-url-consumer" 
-                    placeholder="http://127.0.0.1:8000"
-                    value="http://127.0.0.1:8000"
-                >
-            </div>
-
-            <div class="form-group">
-                <label for="job-text">Input Text</label>
-                <textarea 
-                    id="job-text" 
-                    placeholder="Enter text to process (e.g., 'this is a distributed gpu system demo')"
-                    rows="4"
-                >this is a distributed gpu system demo</textarea>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="chunk-size">Chunk Size (words per task)</label>
-                    <input 
-                        type="number" 
-                        id="chunk-size" 
-                        value="1"
-                        min="1"
-                        max="16"
-                    >
-                </div>
-                <div class="form-group">
-                    <label for="poll-interval">Poll Interval (seconds)</label>
-                    <input 
-                        type="number" 
-                        id="poll-interval" 
-                        value="1"
-                        min="0.5"
-                        max="10"
-                        step="0.5"
-                    >
-                </div>
-            </div>
-
-            <div class="form-row three">
-                <div class="form-group">
-                    <label for="model-name">Model Name</label>
-                    <input 
-                        type="text" 
-                        id="model-name" 
-                        value="demo-model"
-                    >
-                </div>
-                <div class="form-group">
-                    <label for="adapter-name">Adapter Name</label>
-                    <input 
-                        type="text" 
-                        id="adapter-name" 
-                        placeholder="base"
-                    >
-                </div>
-                <div class="form-group">
-                    <label for="priority">Priority</label>
-                    <input 
-                        type="number" 
-                        id="priority" 
-                        value="5"
-                        min="1"
-                        max="10"
-                    >
-                </div>
-            </div>
-
-            <div class="form-row">
-                <div class="form-group">
-                    <label for="batching-mode">Batching Mode</label>
-                    <select id="batching-mode">
-                        <option value="fast">Fast</option>
-                        <option value="balanced" selected>Balanced</option>
-                        <option value="throughput">Throughput</option>
-                    </select>
-                </div>
-                <div class="form-group">
-                    <label for="estimated-memory-mb">Estimated Memory (MB)</label>
-                    <input 
-                        type="number" 
-                        id="estimated-memory-mb" 
-                        value="2048"
-                        min="1"
-                    >
-                </div>
-            </div>
-
-            <button class="btn-primary" onclick="submitJob()" id="submit-btn">
-                Submit Job
-            </button>
-            <button class="btn-secondary" id="cancel-job-btn" onclick="cancelJob()" style="display: none; margin-left: 10px;">
-                Cancel
-            </button>
-
-            <div id="job-progress" class="progress-box" style="display: none;">
-                <div class="progress-title">Job Progress</div>
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
-                </div>
-                <div class="progress-text">
-                    <span id="progress-text">0/0 tasks completed</span>
-                </div>
-                <div style="margin-top: 10px; color: #666; font-size: 14px;">
-                    Status: <strong id="job-status">Running</strong>
-                </div>
-            </div>
-
-            <div id="job-result" class="result-box" style="display: none;">
-                <div class="result-title">✓ Job Completed</div>
-                <div class="result-text" id="result-text"></div>
-            </div>
-        </div>
-
-        <!-- Training Sync Panel -->
-        <div id="training" class="panel">
-            <h2>Synchronized Training</h2>
-
-            <div id="training-message" class="message"></div>
-
-            <div class="status-box">
-                <div class="status-label">What this does</div>
-                <div class="status-value">Uploads a YOLO dataset zip, shards it across workers, and coordinates round-by-round weight averaging.</div>
-                <div class="hint">Run terminal workers on each GPU machine with <strong>python worker.py --server http://YOUR_SERVER:8000</strong>. The dashboard submits the training job and watches progress over the network.</div>
-            </div>
-
-            <div class="form-group">
-                <label for="server-url-training">Server URL</label>
-                <input
-                    type="text"
-                    id="server-url-training"
-                    placeholder="http://127.0.0.1:8000"
-                    value="http://127.0.0.1:8000"
-                >
-            </div>
-
-            <div class="form-row three">
-                <div class="form-group">
-                    <label for="training-job-name">Job Name</label>
-                    <input type="text" id="training-job-name" value="collaborative-yolo-run">
-                </div>
-                <div class="form-group">
-                    <label for="training-base-model">Base Model</label>
-                    <input type="text" id="training-base-model" value="yolov8n-obb.pt">
-                </div>
-                <div class="form-group">
-                    <label for="training-epochs">Synchronized Rounds</label>
-                    <input type="number" id="training-epochs" value="2" min="1" max="1000">
-                </div>
-            </div>
-
-            <div class="form-row three">
-                <div class="form-group">
-                    <label for="training-imgsz">Image Size</label>
-                    <input type="number" id="training-imgsz" value="640" min="32" max="4096">
-                </div>
-                <div class="form-group">
-                    <label for="training-batch">Batch Size</label>
-                    <input type="number" id="training-batch" value="8" min="1" max="128">
-                </div>
-                <div class="form-group">
-                    <label for="training-workers">Worker Count</label>
-                    <input type="number" id="training-workers" value="2" min="1" max="16">
-                </div>
-            </div>
-
-            <div class="form-group">
-                <label for="training-class-names">Class Names</label>
-                <input type="text" id="training-class-names" value="object" placeholder="object, person, car">
-            </div>
-
-            <div class="form-group">
-                <label for="training-dataset-zip">Dataset Zip</label>
-                <input type="file" id="training-dataset-zip" accept=".zip">
-                <div class="hint">Zip should preserve the YOLO folder layout: images/train, images/val, labels/train, labels/val.</div>
-            </div>
-
-            <button class="btn-primary" onclick="submitTrainingJob()" id="submit-training-btn">
-                Start Synchronized Training
-            </button>
-            <button class="btn-secondary" id="cancel-training-btn" onclick="cancelTrainingJob()" style="display: none; margin-left: 10px;">
-                Cancel
-            </button>
-
-            <div id="training-progress" class="progress-box" style="display: none;">
-                <div class="progress-title">Training Progress</div>
-                <div class="progress-bar">
-                    <div class="progress-fill" id="training-progress-fill" style="width: 0%"></div>
-                </div>
-                <div class="progress-text">
-                    <span id="training-progress-text">0/0 rounds completed</span>
-                </div>
-                <div class="metric-grid">
-                    <div class="metric-card">
-                        <div class="metric-label">Round</div>
-                        <div class="metric-value" id="training-round-value">0</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-label">Workers</div>
-                        <div class="metric-value" id="training-worker-value">0</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="metric-label">Status</div>
-                        <div class="metric-value" id="training-status-value">Queued</div>
-                    </div>
-                </div>
-            </div>
-
-            <div id="training-result" class="result-box" style="display: none;">
-                <div class="result-title">✓ Training Completed</div>
-                <div class="result-text" id="training-result-text"></div>
-            </div>
-        </div>
+  <!-- MAIN -->
+  <div class="main">
+    <div class="section-label">Active nodes</div>
+    <div class="nodes-strip" id="nodesStrip">
+      <span class="empty-note">Check connection to see registered workers.</span>
     </div>
 
-    <script>
-        let currentJobId = null;
-        let pollInterval = null;
-        let currentTrainingJobId = null;
-        let trainingPollInterval = null;
-        let workerNodeId = null;
-        let workerServerUrl = null;
-        let heartbeatInterval = null;
-        let workerLoopTimeout = null;
-        let workerRunning = false;
-        let workerActiveBatch = null;
+    <div class="section-label">Run board</div>
+    <div class="board">
+      <div class="board-head">
+        <div>Run</div><div>Status</div><div>Stage</div><div>Round</div><div>Elapsed</div><div>Weights</div>
+      </div>
+      <div class="board-row" id="row-1">
+        <div class="run-name">1 GPU<small>worker_count = 1</small></div>
+        <div><span class="stage-pill idle" id="pill-1">idle</span></div>
+        <div class="stage-detail" id="detail-1">—</div>
+        <div id="round-1">—</div>
+        <div class="elapsed" id="elapsed-1">00:00.0</div>
+        <div><a class="dl-link disabled" id="dl-1">.pt file</a></div>
+      </div>
+      <div class="board-row" id="row-2">
+        <div class="run-name">2 GPUs<small>worker_count = 2</small></div>
+        <div><span class="stage-pill idle" id="pill-2">idle</span></div>
+        <div class="stage-detail" id="detail-2">—</div>
+        <div id="round-2">—</div>
+        <div class="elapsed" id="elapsed-2">00:00.0</div>
+        <div><a class="dl-link disabled" id="dl-2">.pt file</a></div>
+      </div>
+    </div>
 
-        function detectDefaultServerUrl() {
-            const query = new URLSearchParams(window.location.search);
-            const fromQuery = query.get('server');
-            if (fromQuery) {
-                return fromQuery.replace(/\/$/, '');
-            }
+    <div class="section-label">Console</div>
+    <div class="console" id="console"></div>
 
-            if (window.location.protocol === 'file:') {
-                return 'http://127.0.0.1:8000';
-            }
+    <div id="summarySection" style="display:none;">
+      <div class="section-label">Training summary</div>
+      <div class="summary-cards">
+        <div class="card"><div class="k">1-GPU time</div><div class="v" id="sumT1">—</div></div>
+        <div class="card"><div class="k">2-GPU time</div><div class="v" id="sumT2">—</div></div>
+        <div class="card"><div class="k">Measured speedup</div><div class="v accent" id="sumSpeedup">—</div></div>
+      </div>
+      <div class="panel">
+        <p class="panel-title">Training time by run</p>
+        <p class="panel-sub">Wall-clock seconds reported by the coordinator for each job — matches weights/comparison.json.</p>
+        <div class="chart-box"><canvas id="trainTimeChart"></canvas></div>
+        <button class="btn" id="downloadComparisonBtn" style="margin-top:14px;">Download comparison.json</button>
+      </div>
+    </div>
 
-            const port = window.location.port || '8000';
-            return `${window.location.protocol}//${window.location.hostname}:${port}`;
+    <div id="evalSection" style="display:none;">
+      <div class="section-label">Evaluation metrics</div>
+      <div class="panel">
+        <p class="panel-title">Automatic 1-GPU vs 2-GPU comparison</p>
+        <p class="panel-sub">Loaded from the results JSON on the coordinator — precision, recall and mAP computed server-side against the same evaluation dataset.</p>
+        <table class="metrics" id="metricsTable"></table>
+        <div class="charts-grid">
+          <div class="chart-box"><h4>Training time (s)</h4><canvas id="evalTimeChart"></canvas></div>
+          <div class="chart-box"><h4>mAP@50</h4><canvas id="evalMapChart"></canvas></div>
+          <div class="chart-box"><h4>Speed — eval time vs inference (ms)</h4><canvas id="evalSpeedChart"></canvas></div>
+          <div class="chart-box"><h4>Accuracy vs training time</h4><canvas id="evalScatterChart"></canvas></div>
+        </div>
+        <div class="insight" id="evalInsight"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="footer-note">
+  This console talks directly to the coordinator's HTTP API (/nodes, /submit_training_job, /training_status/&lt;id&gt;, /training_jobs/&lt;id&gt;/weights) from the browser — the same calls run_weight_jobs.py makes. It fetches strawberry_dataset.zip itself, so there's nothing to upload. No training or evaluation logic runs here or was altered; if the coordinator doesn't send CORS headers, or doesn't serve strawberry_dataset.zip over HTTP, those requests will fail and the error banner above the Compare button will say so.
+</div>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const state = { theme: 'dark', comparison: null, charts: {}, running: false };
+
+  window.addEventListener('beforeunload', (e) => {
+    if(state.running){
+      e.preventDefault();
+      e.returnValue = 'A training comparison is still running — leaving or reloading this page will lose all progress.';
+      return e.returnValue;
+    }
+  });
+
+  // ---------- Theme ----------
+  $('themeToggle').addEventListener('click', () => {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', state.theme);
+    $('themeToggle').textContent = state.theme === 'dark' ? '☾  dark' : '☀  light';
+  });
+
+  // ---------- Console log ----------
+  function log(msg, cls){
+    const el = $('console');
+    const line = document.createElement('div');
+    const ts = new Date().toLocaleTimeString('en-GB');
+    line.innerHTML = `<span class="t">[${ts}]</span> ${cls ? `<span class="${cls}">${msg}</span>` : msg}`;
+    el.appendChild(line);
+    el.scrollTop = el.scrollHeight;
+  }
+  log('Console ready.');
+
+  // ---------- Dataset auto-fetch (no upload — same default filename Streamlit used) ----------
+  async function fetchDatasetZip(name){
+    const candidates = [`${base()}/${name}`, `./${name}`, `${name}`];
+    let lastErr;
+    for(const url of candidates){
+      try{
+        log(`Fetching dataset ${url} ...`);
+        const res = await fetch(url);
+        if(!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        log(`Dataset fetched (${(blob.size/1024).toFixed(0)} KB) from ${url}`);
+        return new File([blob], name, { type: 'application/zip' });
+      }catch(err){
+        lastErr = err;
+      }
+    }
+    throw new Error(`Could not fetch "${name}" from the coordinator or this page's folder (${lastErr && lastErr.message}). The coordinator needs to serve this file over HTTP for the browser to read it — a browser can't open a path on the coordinator's local disk the way Streamlit could.`);
+  }
+
+  // ---------- HTTP helpers ----------
+  function base(){ return $('serverUrl').value.replace(/\/$/, ''); }
+
+  async function httpGet(path){
+    const res = await fetch(base() + path);
+    if(!res.ok) throw new Error(`GET ${path} → HTTP ${res.status}`);
+    return res.json();
+  }
+  async function httpPost(path, payload){
+    const res = await fetch(base() + path, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    if(!res.ok) throw new Error(`POST ${path} → HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function fileToB64(file){
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result.split(',')[1]);
+      r.onerror = () => reject(new Error('Could not read file'));
+      r.readAsDataURL(file);
+    });
+  }
+  function b64ToBlob(b64, type='application/octet-stream'){
+    const bytes = atob(b64);
+    const arr = new Uint8Array(bytes.length);
+    for(let i=0;i<bytes.length;i++) arr[i] = bytes.charCodeAt(i);
+    return new Blob([arr], {type});
+  }
+
+  // ---------- Connection check ----------
+  async function checkConnection(){
+    try{
+      const data = await httpGet('/nodes');
+      $('connDot').className = 'dot ok';
+      $('connLabel').querySelector('span:last-child').textContent = 'coordinator reachable';
+      renderNodes(data.nodes || {});
+      log(`Connected — ${Object.keys(data.nodes||{}).length} node(s) registered.`);
+      return data;
+    }catch(err){
+      $('connDot').className = 'dot bad';
+      $('connLabel').querySelector('span:last-child').textContent = 'unreachable';
+      log(`Connection failed: ${err.message}`, 'err');
+      throw err;
+    }
+  }
+  $('checkBtn').addEventListener('click', checkConnection);
+
+  function renderNodes(nodes){
+    const strip = $('nodesStrip');
+    strip.innerHTML = '';
+    const entries = Object.values(nodes);
+    if(!entries.length){
+      strip.innerHTML = '<span class="empty-note">No workers registered yet.</span>';
+      return;
+    }
+    entries.forEach(n => {
+      const chip = document.createElement('div');
+      chip.className = 'node-chip';
+      const dotCls = n.active ? 'dot ok' : 'dot bad';
+      chip.innerHTML = `<span class="${dotCls}"></span>${n.display_name || (n.node_id||'').slice(0,8)}${n.supports_training===false ? ' · no-train' : ''}`;
+      strip.appendChild(chip);
+    });
+  }
+
+  // ---------- Dataset trimming: faithful port of federated_training.discover_yolo_split_dirs
+  //             + run_weight_jobs.create_limited_dataset_zip. Not a reinterpretation — same
+  //             root-folder detection, same images/train | train/images search order, same
+  //             "val" (not "valid") matching, same first-N-sorted image selection. ----------
+  const IMAGE_EXT = /\.(jpg|jpeg|png|bmp|webp)$/i;
+
+  function zipEntries(zip){
+    const files = [];       // file paths (posix, no leading/trailing slash)
+    const explicitDirs = [];// explicit directory entries the zip declares
+    Object.keys(zip.files).forEach(p => {
+      const entry = zip.files[p];
+      const clean = p.replace(/\/+$/, '').replace(/^\/+/, '');
+      if(!clean) return;
+      if(entry.dir) explicitDirs.push(clean); else files.push(clean);
+    });
+    return { files, explicitDirs };
+  }
+
+  function ancestorDirs(paths){
+    // every directory implied by a set of file paths, e.g. "a/b/c.jpg" -> "a", "a/b"
+    const dirs = new Set();
+    for(const f of paths){
+      const parts = f.split('/');
+      parts.pop();
+      let cur = '';
+      for(const part of parts){
+        cur = cur ? cur + '/' + part : part;
+        dirs.add(cur);
+      }
+    }
+    return dirs;
+  }
+
+  // Port of discover_yolo_dataset_root: if the zip's top level contains exactly one item
+  // and it is a directory, treat that directory as the dataset root; otherwise the zip's
+  // own top level is the root.
+  function discoverRoot(files, explicitDirs){
+    const dirCandidates = new Set();
+    const fileCandidates = new Set();
+    for(const f of files){
+      const parts = f.split('/');
+      if(parts.length > 1) dirCandidates.add(parts[0]); else fileCandidates.add(parts[0]);
+    }
+    for(const d of explicitDirs){
+      if(d.split('/').length === 1) dirCandidates.add(d);
+    }
+    const allCandidates = new Set([...dirCandidates, ...fileCandidates]);
+    if(allCandidates.size === 1){
+      const only = [...allCandidates][0];
+      if(dirCandidates.has(only)) return only;
+    }
+    return '';
+  }
+
+  // Port of _find_dir_with_suffix: a directory whose last two path components equal (a, b).
+  function findDirWithSuffix(dirsSet, a, b){
+    for(const d of dirsSet){
+      const parts = d.split('/');
+      if(parts.length >= 2 && parts[parts.length - 2] === a && parts[parts.length - 1] === b) return d;
+    }
+    return null;
+  }
+
+  // Port of discover_yolo_split_dirs.
+  function discoverSplitDirs(files, explicitDirs){
+    const rootPrefix = discoverRoot(files, explicitDirs);
+    const scopedFiles = rootPrefix ? files.filter(f => f === rootPrefix || f.startsWith(rootPrefix + '/')) : files;
+    const dirs = ancestorDirs(scopedFiles);
+    explicitDirs.forEach(d => {
+      if(!rootPrefix || d === rootPrefix || d.startsWith(rootPrefix + '/')) dirs.add(d);
+    });
+
+    const trainImages = findDirWithSuffix(dirs, 'images', 'train') || findDirWithSuffix(dirs, 'train', 'images');
+    const trainLabels = findDirWithSuffix(dirs, 'labels', 'train') || findDirWithSuffix(dirs, 'train', 'labels');
+    const valImages = findDirWithSuffix(dirs, 'images', 'val') || findDirWithSuffix(dirs, 'val', 'images');
+    const valLabels = findDirWithSuffix(dirs, 'labels', 'val') || findDirWithSuffix(dirs, 'val', 'labels');
+
+    if(!trainImages || !trainLabels) throw new Error('Dataset must contain train images and labels folders');
+    return { trainImages, trainLabels, valImages, valLabels };
+  }
+
+  // Port of create_limited_dataset_zip: first N sorted train images (+ matching labels if
+  // present), plus the full val split copied as-is into a "valid/" folder if one was found.
+  async function buildLimitedZip(file, maxImages){
+    log(`Trimming dataset to the first ${maxImages} sorted train image(s), same as create_limited_dataset_zip...`);
+    const zip = await JSZip.loadAsync(file);
+    const { files, explicitDirs } = zipEntries(zip);
+    const split = discoverSplitDirs(files, explicitDirs);
+    log(`train_images=${split.trainImages}  train_labels=${split.trainLabels}  val_images=${split.valImages || 'none'}  val_labels=${split.valLabels || 'none'}`);
+
+    const trainImageFiles = files
+      .filter(f => f.startsWith(split.trainImages + '/') && IMAGE_EXT.test(f))
+      .sort()
+      .slice(0, maxImages);
+    if(!trainImageFiles.length) throw new Error('No training images found in dataset ZIP');
+
+    const out = new JSZip();
+    for(const f of trainImageFiles){
+      const relative = f.substring(split.trainImages.length + 1);
+      const data = await zip.files[f].async('uint8array');
+      out.file('train/images/' + relative, data);
+      const relNoExt = relative.replace(IMAGE_EXT, '.txt');
+      const labelPath = split.trainLabels + '/' + relNoExt;
+      if(zip.files[labelPath]){
+        const ldata = await zip.files[labelPath].async('uint8array');
+        out.file('train/labels/' + relNoExt, ldata);
+      }
+    }
+
+    if(split.valImages && split.valLabels){
+      const valFiles = files.filter(f => f.startsWith(split.valImages + '/') && IMAGE_EXT.test(f));
+      for(const f of valFiles){
+        const relative = f.substring(split.valImages.length + 1);
+        const data = await zip.files[f].async('uint8array');
+        out.file('valid/images/' + relative, data);
+        const relNoExt = relative.replace(IMAGE_EXT, '.txt');
+        const labelPath = split.valLabels + '/' + relNoExt;
+        if(zip.files[labelPath]){
+          const ldata = await zip.files[labelPath].async('uint8array');
+          out.file('valid/labels/' + relNoExt, ldata);
         }
+      }
+    }
 
-        function initializeServerFields() {
-            const defaultServerUrl = detectDefaultServerUrl();
-            document.getElementById('server-url-provider').value = defaultServerUrl;
-            document.getElementById('server-url-consumer').value = defaultServerUrl;
-            document.getElementById('server-url-training').value = defaultServerUrl;
-        }
+    const blob = await out.generateAsync({ type: 'blob' });
+    log(`Trimmed dataset built: ${trainImageFiles.length} training image(s) — strawberry_limited.zip`);
+    return new File([blob], 'strawberry_limited.zip', { type: 'application/zip' });
+  }
 
-        function switchTab(tab, btn) {
-            // Hide all panels
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  // ---------- Board / timer helpers ----------
+  const timers = {1:null, 2:null};
+  function fmtElapsed(ms){
+    const s = ms/1000;
+    const m = Math.floor(s/60);
+    const rem = (s - m*60).toFixed(1);
+    return `${String(m).padStart(2,'0')}:${String(rem).padStart(4,'0')}`;
+  }
+  function startTimer(idx){
+    const t0 = performance.now();
+    timers[idx] = setInterval(() => {
+      $('elapsed-'+idx).textContent = fmtElapsed(performance.now() - t0);
+    }, 100);
+    return t0;
+  }
+  function stopTimer(idx){
+    clearInterval(timers[idx]);
+  }
+  function setStage(idx, label, pillClass, detail){
+    $('pill-'+idx).textContent = label;
+    $('pill-'+idx).className = 'stage-pill ' + pillClass;
+    if(detail !== undefined) $('detail-'+idx).textContent = detail;
+  }
+  function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 
-            // Show selected panel
-            document.getElementById(tab).classList.add('active');
-            btn.classList.add('active');
-        }
+  // ---------- Wait for N active workers ----------
+  async function waitForWorkers(required, idx){
+    setStage(idx, 'waiting', 'active', `waiting for ${required} active worker(s)...`);
+    const start = Date.now();
+    while(true){
+      const data = await httpGet('/nodes');
+      renderNodes(data.nodes || {});
+      const active = Object.values(data.nodes||{}).filter(n => n.active && n.supports_training !== false);
+      log(`active_training_workers=${active.length} required=${required}`);
+      if(active.length >= required) return;
+      if(Date.now() - start > 120000) throw new Error(`Timed out waiting for ${required} active worker(s).`);
+      await sleep(5000);
+    }
+  }
 
-        function showMessage(element, message, type) {
-            const msgEl = document.getElementById(element);
-            msgEl.textContent = message;
-            msgEl.className = `message show ${type}`;
-            setTimeout(() => msgEl.classList.remove('show'), 5000);
-        }
+  // ---------- Submit + poll a job ----------
+  async function runJob({idx, jobName, workerCount, datasetZipB64, datasetZipName}){
+    setStage(idx, 'submitting', 'active', 'submitting training job...');
+    log(`Submitting ${jobName} (worker_count=${workerCount})...`);
+    const submitRes = await httpPost('/submit_training_job', {
+      job_name: jobName,
+      dataset_zip_b64: datasetZipB64,
+      dataset_zip_name: datasetZipName,
+      base_model: $('baseModel').value,
+      epochs: Number($('epochs').value),
+      imgsz: Number($('imgsz').value),
+      batch_size: Number($('batch').value),
+      worker_count: workerCount,
+      class_names: ['object'],
+    });
+    const jobId = submitRes.job_id;
+    log(`job_id=${jobId}`);
+    setStage(idx, 'training', 'active', `job ${jobId.slice(0,8)}…`);
 
-        function fileToBase64(file) {
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = () => {
-                    const result = String(reader.result || '');
-                    resolve(result.includes(',') ? result.split(',')[1] : result);
-                };
-                reader.onerror = () => reject(new Error('Failed to read file'));
-                reader.readAsDataURL(file);
-            });
-        }
+    const t0 = startTimer(idx);
+    while(true){
+      const status = await httpGet(`/training_status/${jobId}`);
+      const p = status.progress || {};
+      const workers = p.workers || [];
+      const workerTxt = workers.map(w => `${w.display_name || (w.node_id||'').slice(0,8)}: epoch ${w.epoch||0}/${w.total_epochs||0}`).join(', ') || 'no active worker';
+      $('round-'+idx).textContent = `${p.round ?? '—'}/${p.total_rounds ?? '—'}`;
+      setStage(idx, status.status, 'active', `done ${p.done ?? 0}/${p.total ?? 0} · ${workerTxt}`);
+      log(`job=${jobId.slice(0,8)} status=${status.status} round=${p.round}/${p.total_rounds} done=${p.done}/${p.total}`);
 
-        // ========== GPU PROVIDER FUNCTIONS ==========
+      if(status.status === 'done') break;
+      if(status.status === 'failed'){
+        stopTimer(idx);
+        const detail = (status.errors||[]).map(String).join(' | ') || 'No worker error reported.';
+        setStage(idx, 'failed', 'failed', detail);
+        throw new Error(`Training job failed: ${jobId}. ${detail}`);
+      }
+      await sleep(5000);
+    }
+    const elapsedMs = performance.now() - t0;
+    stopTimer(idx);
+    $('elapsed-'+idx).textContent = fmtElapsed(elapsedMs);
 
-        async function apiJson(url, options = {}) {
-            const response = await fetch(url, options);
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                const detail = payload.detail || response.statusText || 'Request failed';
-                throw new Error(detail);
-            }
-            return payload;
-        }
+    setStage(idx, 'saving', 'active', 'downloading weights...');
+    const weightsRes = await httpGet(`/training_jobs/${jobId}/weights`);
+    if(!weightsRes.weights_b64) throw new Error(`No weights returned for job ${jobId}`);
+    const blob = b64ToBlob(weightsRes.weights_b64);
+    const fileName = `weighted_with_${idx===1?'one':'two'}_${jobId}.pt`;
+    const url = URL.createObjectURL(blob);
+    const link = $('dl-'+idx);
+    link.href = url; link.download = fileName; link.textContent = fileName;
+    link.classList.remove('disabled');
 
-        function browserProcessBatch(batch) {
-            const modelName = batch.model_name || 'demo-model';
-            const adapterName = batch.adapter_name || 'base';
-            return (batch.tasks || []).map((task, index) => ({
-                task_id: task.task_id,
-                job_id: task.job_id,
-                output: `${modelName}:${adapterName}:${index}:${String(task.data).toUpperCase()}`,
-            }));
-        }
+    setStage(idx, 'done', 'done', `saved ${fileName}`);
+    log(`Saved weights → ${fileName}`);
+    return { jobId, elapsedSeconds: elapsedMs/1000, fileName };
+  }
 
-        async function heartbeatOnce() {
-            if (!workerRunning || !workerNodeId || !workerServerUrl) {
-                return;
-            }
-                await apiJson(`${workerServerUrl}/heartbeat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ node_id: workerNodeId, load: workerActiveBatch ? 0.9 : 0.05, active_batches: workerActiveBatch ? 1 : 0, allocated_memory_mb: workerActiveBatch ? (workerActiveBatch.estimated_memory_mb || 0) : 0 })
-            });
-        }
+  // ---------- Main orchestration ----------
+  function showStartError(msg){
+    const el = $('startError');
+    if(!msg){ el.style.display = 'none'; el.textContent = ''; return; }
+    el.style.display = 'block';
+    el.textContent = msg;
+  }
 
-        async function workerLoop() {
-            if (!workerRunning || !workerNodeId || !workerServerUrl) {
-                return;
-            }
+  async function runComparison(){
+    const startBtn = $('startBtn');
+    if(startBtn.disabled) return;
+    startBtn.disabled = true;
+    state.running = true;
+    showStartError(null);
+    $('summarySection').style.display = 'none';
+    [1,2].forEach(idx => { setStage(idx, 'idle', 'idle', '—'); $('round-'+idx).textContent = '—'; $('elapsed-'+idx).textContent = '00:00.0'; });
 
-            try {
-                const response = await apiJson(`${workerServerUrl}/get_batch/${workerNodeId}`);
-                const batch = response.batch;
-                if (batch && batch.batch_id) {
-                    workerActiveBatch = batch;
-                    document.getElementById('provider-status-value').textContent = `Processing batch ${batch.batch_id.slice(0, 8)} (${batch.batch_size} tasks)...`;
-                    const results = browserProcessBatch(batch);
-                    await apiJson(`${workerServerUrl}/submit_batch_result`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            node_id: workerNodeId,
-                            batch_id: batch.batch_id,
-                            results
-                        })
-                    });
-                    workerActiveBatch = null;
-                    document.getElementById('provider-status-value').textContent = '✓ Worker Running';
-                }
-            } catch (error) {
-                document.getElementById('provider-status-value').textContent = `Worker error: ${error.message}`;
-            } finally {
-                if (workerRunning) {
-                    workerLoopTimeout = setTimeout(workerLoop, 1500);
-                }
-            }
-        }
+    try{
+      await checkConnection();
 
-        async function startWorker() {
-            const serverUrl = document.getElementById('server-url-provider').value;
-            const gpuName = document.getElementById('gpu-name').value || 'unknown';
-            const gpuMemoryMb = parseInt(document.getElementById('gpu-memory-mb').value, 10);
-            const maxBatchSize = parseInt(document.getElementById('max-batch-size').value, 10);
-            const preferredModels = document.getElementById('preferred-models').value
-                .split(',')
-                .map(item => item.trim())
-                .filter(Boolean);
+      const datasetFile = await fetchDatasetZip($('datasetName').value.trim() || 'strawberry_dataset.zip');
+      const maxImages = Number($('maxImages').value);
+      let uploadFile = datasetFile;
+      if(maxImages > 0){
+        uploadFile = await buildLimitedZip(datasetFile, maxImages);
+      }
+      const datasetZipB64 = await fileToB64(uploadFile);
+      const datasetZipName = uploadFile.name;
 
-            if (!serverUrl) {
-                showMessage('provider-message', 'Please enter a server URL', 'error');
-                return;
-            }
+      await waitForWorkers(1, 1);
+      const r1 = await runJob({idx:1, jobName:'weighted_with_one', workerCount:1, datasetZipB64, datasetZipName});
 
-            showMessage('provider-message', 'Starting worker...', 'info');
+      await waitForWorkers(2, 2);
+      const r2 = await runJob({idx:2, jobName:'weighted_with_two', workerCount:2, datasetZipB64, datasetZipName});
 
-            workerNodeId = `browser-${crypto.randomUUID()}`;
-            workerServerUrl = serverUrl.replace(/\/$/, '');
+      const speedup = r2.elapsedSeconds > 0 ? r1.elapsedSeconds / r2.elapsedSeconds : 0;
+      state.comparison = {
+        one_worker_seconds: Number(r1.elapsedSeconds.toFixed(3)),
+        two_worker_seconds: Number(r2.elapsedSeconds.toFixed(3)),
+        speedup: Number(speedup.toFixed(3)),
+        one_worker_job_id: r1.jobId,
+        two_worker_job_id: r2.jobId,
+        base_model: $('baseModel').value,
+        epochs: Number($('epochs').value),
+        imgsz: Number($('imgsz').value),
+        batch: Number($('batch').value),
+      };
+      renderSummary(state.comparison);
+      log(`Comparison complete. speedup_x=${speedup.toFixed(3)}`);
+    }catch(err){
+      log(err.message, 'err');
+      showStartError(err.message);
+    }finally{
+      startBtn.disabled = false;
+      state.running = false;
+    }
+  }
 
-            try {
-                await apiJson(`${workerServerUrl}/register_node`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        node_id: workerNodeId,
-                        gpu: gpuName,
-                        gpu_memory_mb: Number.isFinite(gpuMemoryMb) ? gpuMemoryMb : 24000,
-                        max_batch_size: Number.isFinite(maxBatchSize) ? maxBatchSize : 4,
-                        max_parallel_batches: 1,
-                        preferred_models: preferredModels,
-                        supports_training: false,
-                    })
-                });
+  $('startBtn').addEventListener('click', runComparison);
+  document.querySelector('.sidebar').addEventListener('keydown', (e) => {
+    if(e.key === 'Enter'){
+      e.preventDefault();
+      runComparison();
+    }
+  });
 
-                await heartbeatOnce();
-                workerRunning = true;
-                heartbeatInterval = setInterval(() => {
-                    heartbeatOnce().catch(() => {});
-                }, 5000);
-                workerLoop();
+  function renderSummary(c){
+    $('summarySection').style.display = 'block';
+    $('sumT1').textContent = c.one_worker_seconds.toFixed(2) + ' s';
+    $('sumT2').textContent = c.two_worker_seconds.toFixed(2) + ' s';
+    $('sumSpeedup').textContent = c.speedup.toFixed(2) + 'x';
 
-                // Disable button and show stop button
-                document.querySelector('#provider .btn-primary').disabled = true;
-                document.getElementById('stop-worker-btn').style.display = 'inline-block';
+    if(state.charts.trainTime) state.charts.trainTime.destroy();
+    state.charts.trainTime = new Chart($('trainTimeChart'), {
+      type: 'bar',
+      data: {
+        labels: ['1 GPU', '2 GPUs'],
+        datasets: [{ data: [c.one_worker_seconds, c.two_worker_seconds], backgroundColor: [cssVar('--copper'), cssVar('--teal')] }]
+      },
+      options: chartOpts('seconds')
+    });
+  }
 
-                // Show status box
-                const statusBox = document.getElementById('provider-status');
-                statusBox.style.display = 'block';
-                document.getElementById('provider-status-value').textContent = '✓ Worker Running';
+  $('downloadComparisonBtn').addEventListener('click', () => {
+    if(!state.comparison) return;
+    const blob = new Blob([JSON.stringify(state.comparison, null, 2)], {type:'application/json'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'comparison.json';
+    a.click();
+  });
 
-                console.log('Browser worker started with GPU:', gpuName, 'Server:', workerServerUrl, 'Node:', workerNodeId);
-                showMessage('provider-message', `✓ Worker started! Node: ${workerNodeId}`, 'success');
-                refreshNodeList();
-            } catch (error) {
-                workerNodeId = null;
-                workerServerUrl = null;
-                workerRunning = false;
-                showMessage('provider-message', `Failed to start worker: ${error.message}`, 'error');
-            }
-        }
+  // ---------- Evaluation results ----------
+  $('fetchResultsBtn').addEventListener('click', async () => {
+    const url = $('resultsUrl').value.trim();
+    if(!url){ log('Enter a results JSON URL first.', 'err'); return; }
+    try{
+      log(`Fetching evaluation results from ${url}...`);
+      const res = await fetch(url);
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const payload = await res.json();
+      const rows = payload.results || payload; // tolerate either {results:[...]} or a raw array
+      renderEval(Array.isArray(rows) ? rows : []);
+      log('Evaluation results loaded.');
+    }catch(err){
+      log(`Failed to load results: ${err.message}`, 'err');
+    }
+  });
 
-        function stopWorker() {
-            workerRunning = false;
-            workerActiveBatch = null;
-            if (heartbeatInterval) {
-                clearInterval(heartbeatInterval);
-                heartbeatInterval = null;
-            }
-            if (workerLoopTimeout) {
-                clearTimeout(workerLoopTimeout);
-                workerLoopTimeout = null;
-            }
-            workerNodeId = null;
-            workerServerUrl = null;
+  function renderEval(rows){
+    if(!rows.length){ log('Results JSON contained no rows.', 'warn'); return; }
+    $('evalSection').style.display = 'block';
 
-            document.querySelector('#provider .btn-primary').disabled = false;
-            document.getElementById('stop-worker-btn').style.display = 'none';
-            document.getElementById('provider-status').style.display = 'none';
-            showMessage('provider-message', '✓ Worker stopped', 'success');
-        }
+    const table = $('metricsTable');
+    const cols = ['label','weight','train_time','eval_time','precision','recall','map50','map50_95','inference_ms'].filter(c => rows[0].hasOwnProperty(c));
+    table.innerHTML = '<thead><tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr></thead>' +
+      '<tbody>' + rows.map(r => '<tr>' + cols.map(c => `<td class="num">${typeof r[c]==='number' ? r[c].toFixed(4) : r[c]}</td>`).join('') + '</tr>').join('') + '</tbody>';
 
-        function refreshNodeList() {
-            const serverUrl = document.getElementById('server-url-provider').value;
+    const labels = rows.map(r => r.label ?? r.weight);
+    mkChart('evalTimeChart', 'bar', labels, rows.map(r => r.train_time), 'seconds');
+    mkChart('evalMapChart', 'bar', labels, rows.map(r => r.map50), 'mAP@50');
+    if(rows.length === 2){
+      mkChart('evalSpeedChart', 'bar', ['eval_time','inference_ms'],
+        null, 'value', {
+          labelsA: labels[0], labelsB: labels[1],
+          dataA: [rows[0].eval_time, rows[0].inference_ms],
+          dataB: [rows[1].eval_time, rows[1].inference_ms],
+        });
+      mkScatter('evalScatterChart', labels, rows.map(r => ({x:r.train_time, y:r.map50})));
 
-            if (!serverUrl) {
-                showMessage('provider-message', 'Please enter a server URL', 'error');
-                return;
-            }
+      const t1 = rows[0].train_time, t2 = rows[1].train_time;
+      const faster = t1 < t2 ? labels[0] : labels[1];
+      const speedup = Math.max(t1,t2) / Math.min(t1,t2);
+      $('evalInsight').innerHTML =
+        `Training speedup: <b>${speedup.toFixed(2)}x</b> &nbsp;·&nbsp; Faster run: <b>${faster}</b> &nbsp;·&nbsp; Time saved: <b>${Math.abs(t1-t2).toFixed(2)}s</b>`;
+    }
+  }
 
-            apiJson(`${serverUrl}/nodes`)
-                .then(data => {
-                    const nodes = data.nodes || {};
-                    const container = document.getElementById('node-list-container');
-
-                    if (Object.keys(nodes).length === 0) {
-                        container.innerHTML = '<div style="color: #999; text-align: center; padding: 20px;">No active nodes</div>';
-                        return;
-                    }
-
-                    let html = '';
-                    for (const [nodeId, nodeData] of Object.entries(nodes)) {
-                        const statusClass = nodeData.active ? '' : 'inactive';
-                        const statusText = nodeData.active ? '✓ Active' : '✗ Inactive';
-                        html += `
-                            <div class="node-item">
-                                <div class="node-info">
-                                    <div class="node-name">${nodeId}</div>
-                                    <div class="node-gpu">${nodeData.gpu} · ${nodeData.gpu_memory_mb || 0} MB · batch ${nodeData.max_batch_size || 0} · ${nodeData.supports_training ? 'training-capable' : 'demo-only'}</div>
-                                </div>
-                                <div class="node-status ${statusClass}">${statusText}</div>
-                            </div>
-                        `;
-                    }
-                    container.innerHTML = html;
-                })
-                .catch(error => {
-                    showMessage('provider-message', `Error fetching nodes: ${error.message}`, 'error');
-                });
-        }
-
-        // ========== JOB CONSUMER FUNCTIONS ==========
-
-        function submitJob() {
-            const serverUrl = document.getElementById('server-url-consumer').value;
-            const jobText = document.getElementById('job-text').value;
-            const chunkSize = parseInt(document.getElementById('chunk-size').value);
-            const modelName = document.getElementById('model-name').value || 'demo-model';
-            const adapterName = document.getElementById('adapter-name').value.trim();
-            const priority = parseInt(document.getElementById('priority').value, 10);
-            const batchingMode = document.getElementById('batching-mode').value;
-            const estimatedMemoryMb = parseInt(document.getElementById('estimated-memory-mb').value, 10);
-
-            if (!serverUrl) {
-                showMessage('consumer-message', 'Please enter a server URL', 'error');
-                return;
-            }
-
-            if (!jobText.trim()) {
-                showMessage('consumer-message', 'Please enter text to process', 'error');
-                return;
-            }
-
-            // Disable submit, show cancel
-            document.getElementById('submit-btn').disabled = true;
-            document.getElementById('cancel-job-btn').style.display = 'inline-block';
-
-            showMessage('consumer-message', 'Submitting job...', 'info');
-
-            apiJson(`${serverUrl}/submit_job`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    text: jobText,
-                    chunk_size: chunkSize,
-                    model_name: modelName,
-                    adapter_name: adapterName || null,
-                    priority: Number.isFinite(priority) ? priority : 5,
-                    batching_mode: batchingMode,
-                    estimated_memory_mb: Number.isFinite(estimatedMemoryMb) ? estimatedMemoryMb : 2048,
-                })
-            })
-                .then(data => {
-                    currentJobId = data.job_id;
-                    showMessage('consumer-message', `✓ Job submitted! ID: ${currentJobId}`, 'success');
-                    pollJobStatus(serverUrl);
-                })
-                .catch(error => {
-                    showMessage('consumer-message', `Error submitting job: ${error.message}`, 'error');
-                    document.getElementById('submit-btn').disabled = false;
-                    document.getElementById('cancel-job-btn').style.display = 'none';
-                });
-        }
-
-        function pollJobStatus(serverUrl) {
-            const pollInterval_val = parseFloat(document.getElementById('poll-interval').value);
-            const progressBox = document.getElementById('job-progress');
-            const resultBox = document.getElementById('job-result');
-
-            progressBox.style.display = 'block';
-            resultBox.style.display = 'none';
-
-            const poll = () => {
-                apiJson(`${serverUrl}/job_status/${currentJobId}`)
-                    .then(data => {
-                        const progress = data.progress;
-                        const total = progress.total;
-                        const done = progress.done;
-                        const percent = total > 0 ? (done / total) * 100 : 0;
-
-                        document.getElementById('progress-fill').style.width = percent + '%';
-                        document.getElementById('progress-text').textContent = `${done}/${total} tasks completed`;
-                        document.getElementById('job-status').textContent = `${data.status.toUpperCase()} · ${data.model_name || 'demo-model'}`;
-
-                        if (data.status === 'done') {
-                            progressBox.style.display = 'none';
-                            resultBox.style.display = 'block';
-                            document.getElementById('result-text').textContent = data.output;
-                            showMessage('consumer-message', '✓ Job completed successfully!', 'success');
-                            clearTimeout(pollInterval);
-                            document.getElementById('submit-btn').disabled = false;
-                            document.getElementById('cancel-job-btn').style.display = 'none';
-                        } else if (data.status === 'failed') {
-                            progressBox.style.display = 'none';
-                            showMessage('consumer-message', '✗ Job failed after retries', 'error');
-                            clearTimeout(pollInterval);
-                            document.getElementById('submit-btn').disabled = false;
-                            document.getElementById('cancel-job-btn').style.display = 'none';
-                        } else {
-                            pollInterval = setTimeout(poll, pollInterval_val * 1000);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error polling status:', error);
-                        pollInterval = setTimeout(poll, pollInterval_val * 1000);
-                    });
-            };
-
-            poll();
-        }
-
-        function cancelJob() {
-            clearTimeout(pollInterval);
-            currentJobId = null;
-            document.getElementById('job-progress').style.display = 'none';
-            document.getElementById('job-result').style.display = 'none';
-            document.getElementById('submit-btn').disabled = false;
-            document.getElementById('cancel-job-btn').style.display = 'none';
-            showMessage('consumer-message', 'Job cancelled', 'info');
-        }
-
-        async function submitTrainingJob() {
-            const serverUrl = document.getElementById('server-url-training').value;
-            const jobName = document.getElementById('training-job-name').value || 'collaborative-yolo-run';
-            const baseModel = document.getElementById('training-base-model').value || 'yolov8n-obb.pt';
-            const epochs = parseInt(document.getElementById('training-epochs').value, 10);
-            const imgsz = parseInt(document.getElementById('training-imgsz').value, 10);
-            const batchSize = parseInt(document.getElementById('training-batch').value, 10);
-            const workerCount = parseInt(document.getElementById('training-workers').value, 10);
-            const classNames = document.getElementById('training-class-names').value;
-            const fileInput = document.getElementById('training-dataset-zip');
-            const datasetFile = fileInput.files[0];
-
-            if (!serverUrl) {
-                showMessage('training-message', 'Please enter a server URL', 'error');
-                return;
-            }
-
-            if (!datasetFile) {
-                showMessage('training-message', 'Please choose a dataset zip first', 'error');
-                return;
-            }
-
-            document.getElementById('submit-training-btn').disabled = true;
-            document.getElementById('cancel-training-btn').style.display = 'inline-block';
-            showMessage('training-message', 'Uploading dataset and creating synchronized training shards...', 'info');
-
-            try {
-                const datasetZipB64 = await fileToBase64(datasetFile);
-                const response = await apiJson(`${serverUrl}/submit_training_job`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        job_name: jobName,
-                        dataset_zip_b64: datasetZipB64,
-                        dataset_zip_name: datasetFile.name,
-                        base_model: baseModel,
-                        epochs: Number.isFinite(epochs) ? epochs : 2,
-                        imgsz: Number.isFinite(imgsz) ? imgsz : 640,
-                        batch_size: Number.isFinite(batchSize) ? batchSize : 8,
-                        worker_count: Number.isFinite(workerCount) ? workerCount : 2,
-                        class_names: classNames.split(',').map(item => item.trim()).filter(Boolean),
-                    })
-                });
-
-                currentTrainingJobId = response.job_id;
-                showMessage('training-message', `✓ Training job submitted: ${currentTrainingJobId}`, 'success');
-                pollTrainingStatus(serverUrl);
-            } catch (error) {
-                showMessage('training-message', `Training job failed: ${error.message}`, 'error');
-                document.getElementById('submit-training-btn').disabled = false;
-                document.getElementById('cancel-training-btn').style.display = 'none';
-            }
-        }
-
-        function pollTrainingStatus(serverUrl) {
-            const progressBox = document.getElementById('training-progress');
-            const resultBox = document.getElementById('training-result');
-
-            progressBox.style.display = 'block';
-            resultBox.style.display = 'none';
-
-            const poll = () => {
-                apiJson(`${serverUrl}/training_status/${currentTrainingJobId}`)
-                    .then(data => {
-                        const progress = data.progress || {};
-                        const total = progress.total_rounds || 0;
-                        const done = progress.round || 0;
-                        const percent = total > 0 ? (done / total) * 100 : 0;
-
-                        document.getElementById('training-progress-fill').style.width = percent + '%';
-                        document.getElementById('training-progress-text').textContent = `${done}/${total} rounds completed`;
-                        document.getElementById('training-round-value').textContent = `${done}/${total}`;
-                        document.getElementById('training-worker-value').textContent = String(data.worker_count || 0);
-                        document.getElementById('training-status-value').textContent = (data.status || 'queued').toUpperCase();
-
-                        if (data.status === 'done') {
-                            progressBox.style.display = 'none';
-                            resultBox.style.display = 'block';
-                            document.getElementById('training-result-text').textContent = `Final weights available at ${data.weights_url || 'the coordinator'} using base model ${data.base_model || 'unknown'}.`;
-                            showMessage('training-message', '✓ Synchronized training completed', 'success');
-                            clearTimeout(trainingPollInterval);
-                            document.getElementById('submit-training-btn').disabled = false;
-                            document.getElementById('cancel-training-btn').style.display = 'none';
-                        } else if (data.status === 'failed') {
-                            progressBox.style.display = 'none';
-                            showMessage('training-message', '✗ Training failed', 'error');
-                            clearTimeout(trainingPollInterval);
-                            document.getElementById('submit-training-btn').disabled = false;
-                            document.getElementById('cancel-training-btn').style.display = 'none';
-                        } else {
-                            trainingPollInterval = setTimeout(poll, 3000);
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error polling training status:', error);
-                        trainingPollInterval = setTimeout(poll, 3000);
-                    });
-            };
-
-            poll();
-        }
-
-        function cancelTrainingJob() {
-            clearTimeout(trainingPollInterval);
-            currentTrainingJobId = null;
-            document.getElementById('training-progress').style.display = 'none';
-            document.getElementById('training-result').style.display = 'none';
-            document.getElementById('submit-training-btn').disabled = false;
-            document.getElementById('cancel-training-btn').style.display = 'none';
-            showMessage('training-message', 'Training job cancelled', 'info');
-        }
-
-        initializeServerFields();
-    </script>
+  function cssVar(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+  function chartOpts(yTitle){
+    return {
+      responsive:true,
+      plugins:{ legend:{display:false} },
+      scales:{ y:{ title:{display:!!yTitle, text:yTitle, color:cssVar('--text-dim')}, ticks:{color:cssVar('--text-dim')}, grid:{color:cssVar('--border')} },
+                x:{ ticks:{color:cssVar('--text-dim')}, grid:{display:false} } }
+    };
+  }
+  function mkChart(canvasId, type, labels, data, yTitle, grouped){
+    if(state.charts[canvasId]) state.charts[canvasId].destroy();
+    let cfg;
+    if(grouped){
+      cfg = { type:'bar', data:{ labels: labels,
+        datasets:[
+          {label:grouped.labelsA, data:grouped.dataA, backgroundColor:cssVar('--copper')},
+          {label:grouped.labelsB, data:grouped.dataB, backgroundColor:cssVar('--teal')},
+        ]}, options: {...chartOpts(yTitle), plugins:{legend:{display:true, labels:{color:cssVar('--text-dim')}}}} };
+    } else {
+      cfg = { type, data:{ labels, datasets:[{ data, backgroundColor:[cssVar('--copper'), cssVar('--teal'), cssVar('--amber')] }] }, options: chartOpts(yTitle) };
+    }
+    state.charts[canvasId] = new Chart($(canvasId), cfg);
+  }
+  function mkScatter(canvasId, labels, points){
+    if(state.charts[canvasId]) state.charts[canvasId].destroy();
+    state.charts[canvasId] = new Chart($(canvasId), {
+      type:'scatter',
+      data:{ datasets: points.map((p,i) => ({ label: labels[i], data:[p], backgroundColor:[cssVar('--copper'), cssVar('--teal')][i%2], pointRadius:7 })) },
+      options:{ responsive:true,
+        plugins:{ legend:{display:true, labels:{color:cssVar('--text-dim')}} },
+        scales:{ x:{title:{display:true,text:'train_time (s)',color:cssVar('--text-dim')}, ticks:{color:cssVar('--text-dim')}, grid:{color:cssVar('--border')}},
+                 y:{title:{display:true,text:'map50',color:cssVar('--text-dim')}, ticks:{color:cssVar('--text-dim')}, grid:{color:cssVar('--border')}} } }
+    });
+  }
+})();
+</script>
 </body>
 </html>

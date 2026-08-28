@@ -15,6 +15,8 @@ st.set_page_config(page_title="GPU Weight Comparison", layout="wide")
 
 WEIGHTS_DIR = Path("weights")
 TRAINING_JOBS_DIR = Path("training_jobs")
+DEFAULT_EVALUATION_YAML = Path("strawberry_dataset_extract") / "data.yaml"
+AUTOMATED_RESULTS_PATH = WEIGHTS_DIR / "comparison_results.json"
 
 # ==============================
 # Helpers
@@ -88,10 +90,10 @@ def run_live_training_comparison(server_url, dataset_zip, base_model, epochs, im
     if process.returncode != 0:
         status_box.error(f"Training comparison failed after {elapsed:.1f} seconds.")
         st.error("\n".join(output_lines[-10:]))
-        return False
+        return None
 
     status_box.success(f"Training comparison completed in {elapsed:.1f} seconds.")
-    return True
+    return output_lines
 
 def extract_job_id(weight_path):
     if not weight_path:
@@ -114,8 +116,10 @@ def fix_dataset_yaml(data_yaml_path):
     import yaml
 
     data_yaml_path = Path(data_yaml_path)
+    if not data_yaml_path.is_file():
+        raise FileNotFoundError(f"Evaluation YAML is not a file: {data_yaml_path}")
 
-    with open(data_yaml_path, "r") as f:
+    with data_yaml_path.open("r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     dataset_root = data_yaml_path.parent
@@ -139,8 +143,8 @@ def fix_dataset_yaml(data_yaml_path):
 
     fixed_yaml = dataset_root / "fixed_data.yaml"
 
-    with open(fixed_yaml, "w") as f:
-        yaml.dump(data, f)
+    with fixed_yaml.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
 
     return fixed_yaml
 
@@ -217,6 +221,84 @@ def evaluate(weight_path, data_yaml, imgsz, batch, device, conf, iou):
         "inference_ms": float(speed.get("inference", math.nan)),
     }
 
+
+def automated_comparison(timings: dict, evaluation_yaml: Path) -> pd.DataFrame:
+    """Evaluate the two checkpoints created by the runner without user input."""
+    job1 = timings.get("one_worker_job_id")
+    job2 = timings.get("two_worker_job_id")
+    if not job1 or not job2:
+        raise RuntimeError("Training completed but the runner did not provide both job IDs.")
+
+    weight1 = WEIGHTS_DIR / f"weighted_with_one_{job1}.pt"
+    weight2 = WEIGHTS_DIR / f"weighted_with_two_{job2}.pt"
+    missing = [str(path) for path in (weight1, weight2) if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"Training completed but checkpoint(s) are missing: {', '.join(missing)}")
+    if not evaluation_yaml.is_file():
+        raise FileNotFoundError(f"Automatic evaluation YAML not found: {evaluation_yaml}")
+
+    try:
+        import torch
+        device = "0" if torch.cuda.is_available() else "cpu"
+    except Exception:
+        device = "cpu"
+
+    with st.spinner("Evaluating the 1-GPU checkpoint..."):
+        one_worker = evaluate(str(weight1), str(evaluation_yaml), int(timings["imgsz"]), int(timings["batch"]), device, 0.001, 0.6)
+    with st.spinner("Evaluating the 2-GPU checkpoint..."):
+        two_worker = evaluate(str(weight2), str(evaluation_yaml), int(timings["imgsz"]), int(timings["batch"]), device, 0.001, 0.6)
+
+    result = pd.DataFrame([one_worker, two_worker])
+    result["label"] = ["1 GPU", "2 GPUs"]
+    result["train_time"] = [float(timings["one_worker_seconds"]), float(timings["two_worker_seconds"])]
+    result["evaluation_device"] = device
+    return result
+
+
+def save_automated_results(timings: dict, result: pd.DataFrame) -> None:
+    WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
+    AUTOMATED_RESULTS_PATH.write_text(
+        json.dumps({"timings": timings, "results": result.to_dict(orient="records")}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def load_automated_results() -> pd.DataFrame | None:
+    if not AUTOMATED_RESULTS_PATH.is_file():
+        return None
+    try:
+        return pd.DataFrame(json.loads(AUTOMATED_RESULTS_PATH.read_text(encoding="utf-8"))["results"])
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def render_comparison(result: pd.DataFrame) -> None:
+    st.subheader("Automatic 1-GPU vs 2-GPU Comparison")
+    st.dataframe(result, use_container_width=True, hide_index=True)
+
+    one_time, two_time = result["train_time"].iloc[0], result["train_time"].iloc[1]
+    speedup = one_time / two_time if two_time else 0.0
+    metric1, metric2, metric3 = st.columns(3)
+    metric1.metric("1-GPU training time", f"{one_time:.2f} s")
+    metric2.metric("2-GPU training time", f"{two_time:.2f} s")
+    metric3.metric("Measured speedup", f"{speedup:.2f}x")
+
+    time_chart = alt.Chart(result).mark_bar().encode(
+        x=alt.X("label:N", title="Run"),
+        y=alt.Y("train_time:Q", title="Training time (seconds)"),
+        color="label:N",
+        tooltip=["label", "train_time", "map50", "map50_95"],
+    )
+    st.altair_chart(time_chart, use_container_width=True)
+
+    accuracy_chart = alt.Chart(result).mark_bar().encode(
+        x=alt.X("label:N", title="Run"),
+        y=alt.Y("map50:Q", title="mAP@50"),
+        color="label:N",
+        tooltip=["label", "map50", "map50_95", "precision", "recall"],
+    )
+    st.altair_chart(accuracy_chart, use_container_width=True)
+
 # ==============================
 # UI
 # ==============================
@@ -249,7 +331,7 @@ if st.button("Start Live Training Comparison"):
     elif not Path(live_model).exists():
         st.error(f"Base model not found: {live_model}")
     else:
-        run_live_training_comparison(
+        completed_logs = run_live_training_comparison(
             live_server,
             live_dataset,
             live_model,
@@ -258,7 +340,23 @@ if st.button("Start Live Training Comparison"):
             live_batch,
             live_max_images,
         )
-        st.rerun()
+        if completed_logs is not None:
+            try:
+                timings = load_comparison_timings()
+                result = automated_comparison(timings, DEFAULT_EVALUATION_YAML)
+                save_automated_results(timings, result)
+                st.success(f"Training and automatic comparison complete. Saved: {AUTOMATED_RESULTS_PATH}")
+            except Exception as exc:
+                st.error(f"Training completed, but automatic evaluation failed: {type(exc).__name__}: {exc}")
+            st.rerun()
+
+latest_results = load_automated_results()
+if latest_results is not None and not latest_results.empty:
+    render_comparison(latest_results)
+    st.caption(f"Saved automatically to {AUTOMATED_RESULTS_PATH}.")
+else:
+    st.info("Start the live comparison once. The checkpoints, timings, validation metrics, and charts will appear here automatically.")
+st.stop()
 
 weights = list_weight_files()
 
