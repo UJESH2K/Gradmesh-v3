@@ -1,0 +1,7 @@
+path: C:/Users/aadit/OneDrive/Desktop/gpu/test_data
+train: images/train
+val: images/val
+
+nc: 1
+names:
+  0: object

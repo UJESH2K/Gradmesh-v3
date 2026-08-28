@@ -1,0 +1,12 @@
+# Copy this file to data_obb.yaml and update absolute paths.
+# For OBB datasets in Ultralytics, labels should use oriented bbox format.
+
+path: C:/ABSOLUTE/PATH/TO/dataf
+train: images/train
+val: images/val
+# test: images/test
+
+names:
+  0: object
+  # 1: class2
+  # 2: class3

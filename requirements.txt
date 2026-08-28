@@ -1,0 +1,23 @@
+# Use PyPI plus PyTorch CUDA wheel index. When installing, use:
+#   pip install -r requirements.txt
+# The extra index provides CUDA-enabled wheels for torch.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# Core runtime
+fastapi
+uvicorn
+ultralytics==8.4.46
+
+# PyTorch (CUDA 12.1) - pinned to known compatible wheel
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+
+# Optional tooling
+requests
+pyyaml
+numpy
+opencv-python
+scipy
+streamlit
+pandas
+altair

@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+gpu-cuda-venv/
+.vscode/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Logs
+*.log
+
+# Dataset zips
+*.zip
+# Keep training run artifacts out of git by default, but allow explicit files in `weights/`
+runs/
+# Local extracted/training artifacts
+training_jobs/
+strawberry_dataset_extract/
+# Local downloaded model checkpoints
+yolo*.pt
+# Do not globally ignore weights folder so we can include selected model files
+# weights/
+# *.pt
+# *.pth
+
+# OS files
+.DS_Store
+Thumbs.db
