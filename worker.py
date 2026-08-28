@@ -5,6 +5,7 @@ import importlib
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -91,7 +92,7 @@ def detect_gpu_profile() -> tuple[str, int]:
     return "cpu", GPU_MEMORY_MB
 
 
-def register_node(gpu_name: str, gpu_memory_mb: int) -> None:
+def register_node(gpu_name: str, gpu_memory_mb: int, supports_training: bool) -> None:
     http_post(
         "/register_node",
         {
@@ -102,7 +103,7 @@ def register_node(gpu_name: str, gpu_memory_mb: int) -> None:
             "max_batch_size": MAX_BATCH_SIZE,
             "max_parallel_batches": 1,
             "preferred_models": PREFERRED_MODELS,
-            "supports_training": True,
+            "supports_training": supports_training,
         },
         timeout=10,
     )
@@ -114,7 +115,12 @@ def current_load(active_batches: int = 0) -> float:
     return 0.05 if active_batches == 0 else 0.8
 
 
-def send_heartbeat(active_batches: int = 0, allocated_memory_mb: int = 0) -> None:
+def send_heartbeat(
+    active_batches: int = 0,
+    allocated_memory_mb: int = 0,
+    training_epoch: int | None = None,
+    training_total_epochs: int | None = None,
+) -> None:
     http_post(
         "/heartbeat",
         {
@@ -122,6 +128,8 @@ def send_heartbeat(active_batches: int = 0, allocated_memory_mb: int = 0) -> Non
             "load": current_load(active_batches),
             "active_batches": active_batches,
             "allocated_memory_mb": allocated_memory_mb,
+            "training_epoch": training_epoch,
+            "training_total_epochs": training_total_epochs,
         },
         timeout=10,
     )
@@ -186,6 +194,17 @@ def train_batch(batch: dict) -> dict:
         if not data_yaml.exists():
             raise FileNotFoundError("training shard is missing data.yaml")
 
+        # Shards are generated on the coordinator, so their YAML may contain
+        # the coordinator's absolute path. Each worker extracts the archive in
+        # a different temporary directory and must point YOLO at that copy.
+        import yaml
+
+        with data_yaml.open("r", encoding="utf-8") as stream:
+            dataset_config = yaml.safe_load(stream) or {}
+        dataset_config["path"] = str(extract_dir.resolve())
+        with data_yaml.open("w", encoding="utf-8") as stream:
+            yaml.safe_dump(dataset_config, stream, sort_keys=False)
+
         model_path = download_model(batch.get("base_model", "yolov8n-obb.pt"), temp_root / "models")
         model = YOLO(str(model_path))
         weights_b64 = weights_payload.get("weights_b64")
@@ -204,17 +223,58 @@ def train_batch(batch: dict) -> dict:
             model.model.load_state_dict(compatible_state, strict=False)
 
         device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
-        model.train(
-            data=str(data_yaml),
-            epochs=int(batch.get("epochs", 1)),
-            imgsz=int(batch.get("imgsz", 640)),
-            batch=int(batch.get("batch_size", 8)),
-            device=device,
-            project=str(temp_root / "runs"),
-            name=f"round_{batch.get('round_index', 0)}",
-            workers=0,
-            verbose=False,
+        total_epochs = int(batch.get("epochs", 1))
+        allocated_memory_mb = int(batch.get("estimated_memory_mb", 0))
+        send_heartbeat(
+            active_batches=1,
+            allocated_memory_mb=allocated_memory_mb,
+            training_epoch=0,
+            training_total_epochs=total_epochs,
         )
+
+        progress = {"epoch": 0}
+        heartbeat_stop = threading.Event()
+
+        def keep_training_alive():
+            """YOLO train is blocking, so its worker needs an independent heartbeat."""
+            while not heartbeat_stop.wait(max(1.0, HEARTBEAT_SECONDS / 2)):
+                try:
+                    send_heartbeat(
+                        active_batches=1,
+                        allocated_memory_mb=allocated_memory_mb,
+                        training_epoch=progress["epoch"],
+                        training_total_epochs=total_epochs,
+                    )
+                except Exception as exc:
+                    print(f"[worker:{NODE_ID}] heartbeat during training failed: {exc}")
+
+        def report_epoch_end(trainer):
+            progress["epoch"] = int(getattr(trainer, "epoch", 0)) + 1
+            send_heartbeat(
+                active_batches=1,
+                allocated_memory_mb=allocated_memory_mb,
+                training_epoch=progress["epoch"],
+                training_total_epochs=total_epochs,
+            )
+
+        model.add_callback("on_fit_epoch_end", report_epoch_end)
+        heartbeat_thread = threading.Thread(target=keep_training_alive, daemon=True)
+        heartbeat_thread.start()
+        try:
+            model.train(
+                data=str(data_yaml),
+                epochs=total_epochs,
+                imgsz=int(batch.get("imgsz", 640)),
+                batch=int(batch.get("batch_size", 8)),
+                device=device,
+                project=str(temp_root / "runs"),
+                name=f"round_{batch.get('round_index', 0)}",
+                workers=0,
+                verbose=False,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=2)
 
         encoded_weights = encode_state_dict(model.model.state_dict())
 
@@ -251,6 +311,14 @@ def submit_training_round_result(payload: dict) -> None:
     )
 
 
+def submit_training_batch_failure(batch_id: str, exc: Exception) -> None:
+    http_post(
+        "/submit_training_batch_failure",
+        {"node_id": NODE_ID, "batch_id": batch_id, "error": f"{type(exc).__name__}: {exc}"[:4000]},
+        timeout=30,
+    )
+
+
 def main() -> None:
     global SERVER_URL, POLL_SECONDS, HEARTBEAT_SECONDS, NODE_ID, MAX_BATCH_SIZE, GPU_MEMORY_MB, DISPLAY_NAME
     
@@ -276,8 +344,11 @@ def main() -> None:
     
     init_torch()
     gpu_name, gpu_memory_mb = detect_gpu_profile()
+    supports_training = gpu_name != "cpu"
     print(f"[worker:{NODE_ID}] registering gpu='{gpu_name}' memory={gpu_memory_mb}MB at {SERVER_URL}")
-    register_node(gpu_name, gpu_memory_mb)
+    if not supports_training:
+        print("[worker] CUDA GPU unavailable: this worker will not accept GPU training jobs. Run test_cuda.py and install a CUDA-enabled PyTorch build.")
+    register_node(gpu_name, gpu_memory_mb, supports_training=supports_training)
 
     last_heartbeat = 0.0
     active_batches = 0
@@ -302,8 +373,31 @@ def main() -> None:
                     print(
                         f"[worker:{NODE_ID}] training round={batch.get('round_index')} shard={batch.get('shard_index')} job={batch.get('job_id')}"
                     )
-                    result = train_batch(batch)
-                    submit_training_round_result(result)
+                    # Start before downloads/model initialization. Those steps can take longer
+                    # than the coordinator liveness timeout on a cold worker.
+                    batch_heartbeat_stop = threading.Event()
+
+                    def keep_assigned_training_batch_alive():
+                        while not batch_heartbeat_stop.wait(max(1.0, HEARTBEAT_SECONDS / 2)):
+                            try:
+                                send_heartbeat(
+                                    active_batches=1,
+                                    allocated_memory_mb=allocated_memory_mb,
+                                )
+                            except Exception as exc:
+                                print(f"[worker:{NODE_ID}] assignment heartbeat failed: {exc}")
+
+                    batch_heartbeat_thread = threading.Thread(
+                        target=keep_assigned_training_batch_alive,
+                        daemon=True,
+                    )
+                    batch_heartbeat_thread.start()
+                    try:
+                        result = train_batch(batch)
+                        submit_training_round_result(result)
+                    finally:
+                        batch_heartbeat_stop.set()
+                        batch_heartbeat_thread.join(timeout=2)
                 else:
                     print(
                         f"[worker:{NODE_ID}] batch={batch_id} model={batch.get('model_name')} size={batch.get('batch_size')}"
@@ -323,6 +417,12 @@ def main() -> None:
             break
         except error.HTTPError as exc:
             # Ensure scheduler does not think this worker is still busy after an error.
+            was_training_batch = bool(active_batches and 'batch_id' in locals() and batch and batch.get("kind") == "training")
+            if was_training_batch:
+                try:
+                    submit_training_batch_failure(batch_id, exc)
+                except Exception:
+                    pass
             active_batches = 0
             allocated_memory_mb = 0
             try:
@@ -333,13 +433,19 @@ def main() -> None:
             time.sleep(POLL_SECONDS)
         except Exception as exc:
             # Training failures can happen (bad shard, format mismatch). Reset busy state so worker can continue.
+            was_training_batch = bool(active_batches and 'batch_id' in locals() and batch and batch.get("kind") == "training")
+            if was_training_batch:
+                try:
+                    submit_training_batch_failure(batch_id, exc)
+                except Exception:
+                    pass
             active_batches = 0
             allocated_memory_mb = 0
             try:
                 send_heartbeat(active_batches=active_batches, allocated_memory_mb=allocated_memory_mb)
             except Exception:
                 pass
-            print(f"[worker:{NODE_ID}] error: {exc}")
+            print(f"[worker:{NODE_ID}] error: {type(exc).__name__}: {exc}")
             time.sleep(POLL_SECONDS)
 
 

@@ -36,7 +36,7 @@ def load_comparison_timings():
         return {}
 
 
-def run_live_training_comparison(server_url, dataset_zip, base_model, epochs, imgsz, batch):
+def run_live_training_comparison(server_url, dataset_zip, base_model, epochs, imgsz, batch, max_images):
     command = [
         sys.executable,
         "-u",
@@ -54,6 +54,8 @@ def run_live_training_comparison(server_url, dataset_zip, base_model, epochs, im
         "--batch",
         str(batch),
     ]
+    if max_images > 0:
+        command.extend(["--max-images", str(max_images)])
     process = subprocess.Popen(
         command,
         cwd=Path(__file__).resolve().parent,
@@ -225,7 +227,7 @@ st.subheader("Live Training Comparison")
 st.caption("The runner measures both jobs automatically. Keep one worker active for the first run and both workers active for the second run.")
 live_server = st.text_input("Coordinator URL", value="http://127.0.0.1:8000")
 live_dataset = st.text_input("Training Dataset ZIP", value="strawberry_dataset.zip")
-live_model = st.text_input("Training Base Model", value="yolov8n-obb.pt")
+live_model = st.text_input("Training Base Model", value="yolov8n.pt")
 live_col1, live_col2, live_col3 = st.columns(3)
 with live_col1:
     live_epochs = st.number_input("Training Rounds", min_value=1, max_value=1000, value=2)
@@ -233,6 +235,13 @@ with live_col2:
     live_imgsz = st.number_input("Training Image Size", min_value=32, max_value=4096, value=512)
 with live_col3:
     live_batch = st.number_input("Per-worker Batch", min_value=1, max_value=128, value=2)
+live_max_images = st.number_input(
+    "Training Images (0 = full strawberry dataset)",
+    min_value=0,
+    max_value=10000,
+    value=20,
+    step=5,
+)
 
 if st.button("Start Live Training Comparison"):
     if not Path(live_dataset).exists():
@@ -247,6 +256,7 @@ if st.button("Start Live Training Comparison"):
             live_epochs,
             live_imgsz,
             live_batch,
+            live_max_images,
         )
         st.rerun()
 

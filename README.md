@@ -238,8 +238,9 @@ dataset/
 └── data.yaml
 ```
 
-For OBB training, the annotation format and selected YOLO OBB model must
-match.
+The included strawberry labels use standard YOLO detection boxes
+(`class x_center y_center width height`), so use a detection model such as
+`yolov8n.pt`, not an OBB model.
 
 Always validate the dataset with a single-GPU run before using it for
 the distributed benchmark.
@@ -291,7 +292,7 @@ serialization, synchronization, and stragglers create overhead.
 ## Example Training
 
 ``` powershell
-python run_weight_jobs.py --server http://127.0.0.1:8000 --dataset-zip strawberry_dataset.zip --base-model yolov8n-obb.pt --epochs 2 --imgsz 512 --batch 2
+python run_weight_jobs.py --server http://127.0.0.1:8000 --dataset-zip strawberry_dataset.zip --base-model yolov8n.pt --epochs 2 --imgsz 512 --batch 2
 ```
 
 A larger controlled comparison:

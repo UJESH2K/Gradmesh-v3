@@ -68,6 +68,8 @@ class HeartbeatRequest(BaseModel):
     load: Optional[float] = None
     active_batches: Optional[int] = None
     allocated_memory_mb: Optional[int] = None
+    training_epoch: Optional[int] = None
+    training_total_epochs: Optional[int] = None
 
 
 class SubmitJobRequest(BaseModel):
@@ -99,6 +101,12 @@ class SubmitTrainingRoundResultRequest(BaseModel):
     round_index: int = Field(ge=0)
     weights_b64: str = Field(..., min_length=1)
     metrics: Optional[dict] = None
+
+
+class SubmitTrainingBatchFailureRequest(BaseModel):
+    node_id: str
+    batch_id: str
+    error: str = Field(..., min_length=1)
 
 
 class SubmitBatchResultItem(BaseModel):
@@ -178,7 +186,25 @@ def _release_training_batch_locked(batch_id: str, requeue: bool = False) -> None
         node["allocated_memory_mb"] = max(0, node["allocated_memory_mb"] - memory_mb)
         node["active_batches"] = max(0, node["active_batches"] - 1)
 
-    batch["status"] = "requeued" if requeue else "done"
+    # A requeued training batch must be schedulable again; the training
+    # scheduler only selects batches whose status is exactly "queued".
+    batch["status"] = "queued" if requeue else "done"
+    batch["finished_at"] = time.time()
+
+
+def _fail_training_batch_locked(batch_id: str, message: str) -> None:
+    """Finish a failed training batch without hiding the worker error."""
+    batch = training_batches.get(batch_id)
+    if batch is None or batch.get("status") not in {"assigned", "running"}:
+        return
+
+    node_id = batch["node_id"]
+    if node_id in nodes:
+        node = nodes[node_id]
+        node["allocated_memory_mb"] = max(0, node["allocated_memory_mb"] - batch.get("memory_mb", 0))
+        node["active_batches"] = max(0, node["active_batches"] - 1)
+    batch["status"] = "failed"
+    batch["error"] = message
     batch["finished_at"] = time.time()
 
 
@@ -415,6 +441,7 @@ def _enqueue_training_round_locked(job_id: str) -> None:
             "shard_zip_path": str(shard["zip_path"]),
             "data_yaml_path": str(shard["data_yaml_path"]),
             "metrics": None,
+            "error": None,
             "weights_b64": job.get("current_weights_b64"),
         }
         training_queue.append(batch_id)
@@ -525,6 +552,7 @@ def _pop_training_batch_from_queue_locked(node: dict) -> Optional[dict]:
             "base_model": batch["base_model"],
             "imgsz": batch["imgsz"],
             "batch_size": batch["batch_size"],
+            "estimated_memory_mb": batch["memory_mb"],
             "epochs": batch["epochs"],
             "job_name": job["job_name"],
             "class_names": job["class_names"],
@@ -582,6 +610,8 @@ def register_node(req: RegisterNodeRequest):
             "completed_batches": 0,
             "last_batch_size": 0,
             "last_batch_model": None,
+            "training_epoch": 0,
+            "training_total_epochs": 0,
         }
     return {"status": "registered", "node_id": req.node_id}
 
@@ -604,6 +634,10 @@ def heartbeat(req: HeartbeatRequest):
             nodes[req.node_id]["active_batches"] = req.active_batches
         if req.allocated_memory_mb is not None:
             nodes[req.node_id]["allocated_memory_mb"] = req.allocated_memory_mb
+        if req.training_epoch is not None:
+            nodes[req.node_id]["training_epoch"] = req.training_epoch
+        if req.training_total_epochs is not None:
+            nodes[req.node_id]["training_total_epochs"] = req.training_total_epochs
     return {"status": "ok"}
 
 
@@ -824,6 +858,19 @@ def submit_training_round_result(req: SubmitTrainingRoundResultRequest):
     return {"status": "received", "batch_id": req.batch_id}
 
 
+@app.post("/submit_training_batch_failure")
+def submit_training_batch_failure(req: SubmitTrainingBatchFailureRequest):
+    with state_lock:
+        batch = training_batches.get(req.batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="Unknown batch_id")
+        if batch.get("node_id") != req.node_id:
+            raise HTTPException(status_code=409, detail="Batch is not assigned to this node")
+        _fail_training_batch_locked(req.batch_id, req.error)
+        _update_training_job_status_locked(batch["job_id"])
+    return {"status": "recorded", "batch_id": req.batch_id}
+
+
 @app.post("/submit_result")
 def submit_result(req: SubmitBatchResultRequest):
     return submit_batch_result(req)
@@ -851,7 +898,19 @@ def job_status(job_id: str):
                     "done": sum(1 for batch in round_batches if batch.get("status") == "done"),
                     "pending": sum(1 for batch in round_batches if batch.get("status") == "queued"),
                     "assigned": sum(1 for batch in round_batches if batch.get("status") == "assigned"),
+                    "failed": sum(1 for batch in round_batches if batch.get("status") == "failed"),
                     "total": len(round_batches),
+                    "workers": [
+                        {
+                            "node_id": node["node_id"],
+                            "display_name": node.get("display_name"),
+                            "gpu": node.get("gpu"),
+                            "epoch": node.get("training_epoch", 0),
+                            "total_epochs": node.get("training_total_epochs", 0),
+                        }
+                        for node in nodes.values()
+                        if node.get("active") and node.get("active_batches", 0) > 0
+                    ],
                 },
                 "base_model": job["base_model"],
                 "imgsz": job["imgsz"],
@@ -859,6 +918,7 @@ def job_status(job_id: str):
                 "worker_count": job["worker_count"],
                 "class_names": job["class_names"],
                 "round_metrics": job.get("round_metrics", []),
+                "errors": [batch.get("error") for batch in round_batches if batch.get("error")],
             }
             if job["status"] == "done":
                 response["weights_url"] = f"/training_jobs/{job_id}/weights"

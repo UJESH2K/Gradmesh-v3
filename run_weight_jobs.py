@@ -1,9 +1,14 @@
 import argparse
 import base64
 import json
+import shutil
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 from urllib import request
+
+from federated_training import discover_yolo_split_dirs
 
 
 def banner(title: str) -> None:
@@ -37,22 +42,79 @@ def file_to_b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode("ascii")
 
 
+def create_limited_dataset_zip(source_zip: Path, max_images: int, temp_dir: Path) -> Path:
+    extracted = temp_dir / "dataset"
+    with zipfile.ZipFile(source_zip, "r") as archive:
+        archive.extractall(extracted)
+
+    split_dirs = discover_yolo_split_dirs(extracted)
+    train_images = sorted(
+        path
+        for path in split_dirs["train_images"].rglob("*")
+        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+    )[:max_images]
+    if not train_images:
+        raise ValueError("No training images found in dataset ZIP")
+
+    limited_root = temp_dir / "limited_dataset"
+    train_image_dir = limited_root / "train" / "images"
+    train_label_dir = limited_root / "train" / "labels"
+    for image_path in train_images:
+        relative = image_path.relative_to(split_dirs["train_images"])
+        destination = train_image_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(image_path, destination)
+        label_path = split_dirs["train_labels"] / relative.with_suffix(".txt")
+        if label_path.exists():
+            label_destination = train_label_dir / relative.with_suffix(".txt")
+            label_destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(label_path, label_destination)
+
+    if split_dirs["val_images"] is not None and split_dirs["val_labels"] is not None:
+        for image_path in split_dirs["val_images"].rglob("*"):
+            if not image_path.is_file() or image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+                continue
+            relative = image_path.relative_to(split_dirs["val_images"])
+            destination = limited_root / "valid" / "images" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(image_path, destination)
+            label_path = split_dirs["val_labels"] / relative.with_suffix(".txt")
+            if label_path.exists():
+                label_destination = limited_root / "valid" / "labels" / relative.with_suffix(".txt")
+                label_destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(label_path, label_destination)
+
+    limited_zip = temp_dir / "strawberry_limited.zip"
+    with zipfile.ZipFile(limited_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for file_path in limited_root.rglob("*"):
+            if file_path.is_file():
+                archive.write(file_path, file_path.relative_to(limited_root))
+    return limited_zip
+
+
 def wait_training_done(base: str, job_id: str, poll_seconds: float = 5.0) -> tuple[dict, float]:
     start = time.time()
     while True:
         status = http_get(base, f"/training_status/{job_id}", timeout=20)
         progress = status.get("progress", {})
+        workers = progress.get("workers", [])
+        worker_progress = ", ".join(
+            f"{worker.get('display_name') or worker.get('node_id', '')[:8]}: epoch {worker.get('epoch', 0)}/{worker.get('total_epochs', 0)}"
+            for worker in workers
+        ) or "no active worker"
         elapsed = time.time() - start
         print(
             f"[{now_ts()}] job={job_id[:8]} status={status.get('status'):<7} "
             f"round={progress.get('round')}/{progress.get('total_rounds')} "
             f"done={progress.get('done')}/{progress.get('total')} "
-            f"assigned={progress.get('assigned')} elapsed={elapsed:6.1f}s"
+            f"assigned={progress.get('assigned')} elapsed={elapsed:6.1f}s {worker_progress}"
         )
         if status.get("status") == "done":
             return status, time.time() - start
         if status.get("status") == "failed":
-            raise RuntimeError(f"Training job failed: {job_id}")
+            errors = status.get("errors") or []
+            detail = " | ".join(str(item) for item in errors) or "No worker error was reported."
+            raise RuntimeError(f"Training job failed: {job_id}. {detail}")
         time.sleep(poll_seconds)
 
 
@@ -118,12 +180,18 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10, help="Epochs (rounds) per job")
     parser.add_argument("--imgsz", type=int, default=640, help="Image size")
     parser.add_argument("--batch", type=int, default=4, help="Batch size")
+    parser.add_argument("--max-images", type=int, default=0, help="Limit training images per experiment; 0 uses the full dataset")
     args = parser.parse_args()
 
     base = args.server.rstrip("/")
     dataset_zip = Path(args.dataset_zip)
     if not dataset_zip.exists():
         raise FileNotFoundError(f"Dataset zip not found: {dataset_zip}")
+
+    temp_dir = tempfile.TemporaryDirectory()
+    if args.max_images > 0:
+        dataset_zip = create_limited_dataset_zip(dataset_zip, args.max_images, Path(temp_dir.name))
+        print(f"using limited dataset: {args.max_images} training images")
 
     banner("WAITING FOR 1 ACTIVE WORKER")
     wait_for_active_workers(base, required_workers=1)
