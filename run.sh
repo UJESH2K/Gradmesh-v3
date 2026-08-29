@@ -25,17 +25,28 @@ find_python() {
         printf '%s\n' "$ROOT_DIR/.venv/bin/python"
     elif [ -x "$ROOT_DIR/.venv/Scripts/python.exe" ]; then
         printf '%s\n' "$ROOT_DIR/.venv/Scripts/python.exe"
-    elif command -v python3 >/dev/null 2>&1; then
-        command -v python3
-    elif command -v python >/dev/null 2>&1; then
+    elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/Scripts/python.exe" ]; then
+        printf '%s\n' "$VIRTUAL_ENV/Scripts/python.exe"
+    elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+        printf '%s\n' "$VIRTUAL_ENV/bin/python"
+    elif [ -x "$ROOT_DIR/../.venv/Scripts/python.exe" ]; then
+        printf '%s\n' "$ROOT_DIR/../.venv/Scripts/python.exe"
+    elif [ -x "$ROOT_DIR/../.venv/bin/python" ]; then
+        printf '%s\n' "$ROOT_DIR/../.venv/bin/python"
+    elif command -v python >/dev/null 2>&1 && python -c "import sys" >/dev/null 2>&1; then
         command -v python
+    elif command -v python3 >/dev/null 2>&1 && python3 -c "import sys" >/dev/null 2>&1; then
+        command -v python3
     else
-        echo "GradMesh: Python was not found. Set PYTHON=/path/to/python." >&2
+        echo "GradMesh: a working Python was not found. Activate the venv or set GRADMESH_PYTHON=/path/to/python." >&2
         exit 1
     fi
 }
 
-PYTHON_BIN=$(find_python)
+PYTHON_BIN=""
+ensure_python() {
+    [ -n "$PYTHON_BIN" ] || PYTHON_BIN=$(find_python)
+}
 mkdir -p "$PID_DIR" "$LOG_DIR"
 
 safe_name() {
@@ -56,6 +67,7 @@ clean_stale_pid() {
 }
 
 start_server() {
+    ensure_python
     pid_file="$PID_DIR/server.pid"
     clean_stale_pid "$pid_file"
     if pid_is_running "$pid_file"; then
@@ -90,6 +102,7 @@ wait_for_server() {
 }
 
 start_worker() {
+    ensure_python
     worker_name=${1:-local-worker-1}
     key=$(safe_name "$worker_name")
     pid_file="$PID_DIR/worker-$key.pid"

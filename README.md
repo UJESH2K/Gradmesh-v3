@@ -85,10 +85,56 @@ coordinator and workers perform the actual training workflow.
 
 ## Process Manager — `run.sh`
 
-`run.sh` starts the coordinator and local worker processes in the
+The process manager starts coordinator and worker processes in the
 background, records their PIDs, and keeps separate logs under
-`.gradmesh/`. Run it from the repository root using a POSIX shell such as
-Linux/macOS `sh`, WSL, or Git Bash on Windows.
+`.gradmesh/`. Use the native script for your shell:
+
+``` text
+PowerShell:  .\run.ps1
+Command Prompt: run.cmd
+Linux/macOS/WSL/Git Bash: sh run.sh
+```
+
+Run these commands from the `Gradmesh-v3` directory, not the parent
+`rain` directory.
+
+### Windows PowerShell
+
+Start the coordinator and one worker, inspect them, and stop them:
+
+``` powershell
+.\run.ps1 start
+.\run.ps1 status
+.\run.ps1 logs server
+.\run.ps1 stop
+```
+
+Targeted commands use the same arguments:
+
+``` powershell
+.\run.ps1 start server
+.\run.ps1 start workers 3
+.\run.ps1 start worker arc-test-1
+.\run.ps1 stop worker arc-test-1
+```
+
+If local PowerShell policy blocks scripts, either use `run.cmd` or invoke:
+
+``` powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1 start
+```
+
+Command Prompt examples:
+
+``` bat
+run.cmd start
+run.cmd status
+run.cmd stop
+```
+
+PowerShell and `run.cmd` do not require `sh` or Git Bash.
+
+### POSIX shells and Git Bash
 
 Start the coordinator and one local worker:
 
@@ -123,11 +169,20 @@ sh run.sh logs [server|WORKER_NAME]
 
 ### Multiple workers on one GPU
 
-Set `WORKER_COUNT` to run multiple independent worker processes against
+Set `GRADMESH_WORKER_COUNT` to run multiple independent worker processes against
 the same locally detected CUDA or XPU device:
 
 ``` sh
 GRADMESH_WORKER_COUNT=3 GRADMESH_WORKER_BACKEND=cuda sh run.sh start
+```
+
+PowerShell uses the same settings through `$env:`:
+
+``` powershell
+$env:GRADMESH_WORKER_COUNT = "3"
+$env:GRADMESH_WORKER_BACKEND = "cuda"
+$env:GRADMESH_MAX_BATCH_SIZE = "1"
+.\run.ps1 start
 ```
 
 Or add individually named workers:
@@ -136,6 +191,22 @@ Or add individually named workers:
 sh run.sh start server
 GRADMESH_WORKER_BACKEND=xpu sh run.sh start worker arc-test-1
 GRADMESH_WORKER_BACKEND=xpu sh run.sh start worker arc-test-2
+```
+
+On Windows, `run.sh` checks the activated `$VIRTUAL_ENV`, a `.venv`
+inside `Gradmesh-v3`, and a `.venv` in the parent `rain` directory before
+checking PATH. This avoids the non-functional Microsoft Store Python
+alias. You can also select Python explicitly in Git Bash:
+
+``` sh
+GRADMESH_PYTHON="$VIRTUAL_ENV/Scripts/python.exe" sh run.sh start
+```
+
+The PowerShell equivalent is:
+
+``` powershell
+$env:GRADMESH_PYTHON = "$env:VIRTUAL_ENV\Scripts\python.exe"
+.\run.ps1 start
 ```
 
 Each managed worker receives a stable, unique node ID based on its name,
@@ -533,6 +604,8 @@ The exact request/response schema in `server.py` is the source of truth.
 ``` text
 GradMesh/
 ├── run.sh
+├── run.ps1
+├── run.cmd
 ├── server.py
 ├── worker.py
 ├── client.py
