@@ -115,6 +115,8 @@ def wait_training_done(base: str, job_id: str, poll_seconds: float = 5.0) -> tup
             errors = status.get("errors") or []
             detail = " | ".join(str(item) for item in errors) or "No worker error was reported."
             raise RuntimeError(f"Training job failed: {job_id}. {detail}")
+        if status.get("status") == "cancelled":
+            raise RuntimeError(f"Training job cancelled: {job_id}. Comparison stopped before the next job.")
         time.sleep(poll_seconds)
 
 

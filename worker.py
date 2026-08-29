@@ -36,6 +36,10 @@ DISPLAY_NAME = os.getenv("DISPLAY_NAME", None)
 BACKEND = os.getenv("BACKEND", "auto")
 
 
+class TrainingCancelled(Exception):
+    """Internal control flow for a cooperatively cancelled training batch."""
+
+
 def http_post(path: str, payload: dict, timeout: int = 10) -> dict:
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -171,10 +175,13 @@ def process_batch(batch: dict) -> list[dict]:
     return results
 
 
-def train_batch(batch: dict) -> dict:
+def train_batch(batch: dict, cancellation_requested: threading.Event | None = None) -> dict:
     if YOLO is None:
         raise RuntimeError("ultralytics is required for training batches")
 
+    cancellation_requested = cancellation_requested or threading.Event()
+    if cancellation_requested.is_set():
+        raise TrainingCancelled(f"training job {batch.get('job_id')} was cancelled")
     shard_bytes = download_bytes(batch["shard_url"], timeout=60)
     weights_payload = http_get(f"{batch['weights_url'].replace(SERVER_URL, '')}", timeout=20)
 
@@ -237,6 +244,12 @@ def train_batch(batch: dict) -> dict:
 
         progress = {"epoch": 0}
         heartbeat_stop = threading.Event()
+        def check_cancellation() -> bool:
+            status = http_get(f"/training_batches/{batch['batch_id']}/status?node_id={NODE_ID}", timeout=5)
+            if status.get("cancel_requested"):
+                cancellation_requested.set()
+                return True
+            return False
 
         def keep_training_alive():
             """YOLO train is blocking, so its worker needs an independent heartbeat."""
@@ -250,6 +263,15 @@ def train_batch(batch: dict) -> dict:
                     )
                 except Exception as exc:
                     print(f"[worker:{NODE_ID}] heartbeat during training failed: {exc}")
+                try:
+                    check_cancellation()
+                except Exception as exc:
+                    print(f"[worker:{NODE_ID}] cancellation check failed: {exc}")
+
+        def stop_cancelled_training(trainer):
+            if cancellation_requested.is_set():
+                # Ultralytics checks trainer.stop inside its normal train loop.
+                trainer.stop = True
 
         def report_epoch_end(trainer):
             progress["epoch"] = int(getattr(trainer, "epoch", 0)) + 1
@@ -261,9 +283,12 @@ def train_batch(batch: dict) -> dict:
             )
 
         model.add_callback("on_fit_epoch_end", report_epoch_end)
+        model.add_callback("on_train_batch_end", stop_cancelled_training)
         heartbeat_thread = threading.Thread(target=keep_training_alive, daemon=True)
         heartbeat_thread.start()
         try:
+            if check_cancellation():
+                raise TrainingCancelled(f"training job {batch.get('job_id')} was cancelled")
             train_options = {
                 "data": str(data_yaml),
                 "epochs": total_epochs,
@@ -281,6 +306,8 @@ def train_batch(batch: dict) -> dict:
             else:
                 # Preserve the existing CUDA/CPU Ultralytics call unchanged.
                 model.train(device=device, **train_options)
+            if cancellation_requested.is_set():
+                raise TrainingCancelled(f"training job {batch.get('job_id')} was cancelled")
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2)
@@ -326,6 +353,14 @@ def submit_training_batch_failure(batch_id: str, exc: Exception) -> None:
         "/submit_training_batch_failure",
         {"node_id": NODE_ID, "batch_id": batch_id, "error": f"{type(exc).__name__}: {exc}"[:4000]},
         timeout=30,
+    )
+
+
+def acknowledge_training_cancellation(batch_id: str) -> None:
+    http_post(
+        f"/training_batches/{batch_id}/cancelled",
+        {"node_id": NODE_ID, "batch_id": batch_id},
+        timeout=15,
     )
 
 
@@ -394,6 +429,7 @@ def main() -> None:
                     # Start before downloads/model initialization. Those steps can take longer
                     # than the coordinator liveness timeout on a cold worker.
                     batch_heartbeat_stop = threading.Event()
+                    batch_cancel_requested = threading.Event()
 
                     def keep_assigned_training_batch_alive():
                         while not batch_heartbeat_stop.wait(max(1.0, HEARTBEAT_SECONDS / 2)):
@@ -404,6 +440,12 @@ def main() -> None:
                                 )
                             except Exception as exc:
                                 print(f"[worker:{NODE_ID}] assignment heartbeat failed: {exc}")
+                            try:
+                                status = http_get(f"/training_batches/{batch_id}/status?node_id={NODE_ID}", timeout=5)
+                                if status.get("cancel_requested"):
+                                    batch_cancel_requested.set()
+                            except Exception as exc:
+                                print(f"[worker:{NODE_ID}] assignment cancellation check failed: {exc}")
 
                     batch_heartbeat_thread = threading.Thread(
                         target=keep_assigned_training_batch_alive,
@@ -411,8 +453,12 @@ def main() -> None:
                     )
                     batch_heartbeat_thread.start()
                     try:
-                        result = train_batch(batch)
-                        submit_training_round_result(result)
+                        try:
+                            result = train_batch(batch, batch_cancel_requested)
+                            submit_training_round_result(result)
+                        except TrainingCancelled:
+                            acknowledge_training_cancellation(batch_id)
+                            print(f"[worker:{NODE_ID}] cancelled batch={batch_id}; worker remains available")
                     finally:
                         batch_heartbeat_stop.set()
                         batch_heartbeat_thread.join(timeout=2)

@@ -83,6 +83,100 @@ Runs the controlled YOLO experiments and training/aggregation helpers.
 Optional visual control surface. It is not the training engine; the
 coordinator and workers perform the actual training workflow.
 
+## Process Manager — `run.sh`
+
+`run.sh` starts the coordinator and local worker processes in the
+background, records their PIDs, and keeps separate logs under
+`.gradmesh/`. Run it from the repository root using a POSIX shell such as
+Linux/macOS `sh`, WSL, or Git Bash on Windows.
+
+Start the coordinator and one local worker:
+
+``` sh
+sh run.sh start
+```
+
+Inspect or stop the managed stack:
+
+``` sh
+sh run.sh status
+sh run.sh logs server
+sh run.sh logs local-worker-1
+sh run.sh stop
+```
+
+The complete command set is:
+
+``` text
+sh run.sh start
+sh run.sh start server
+sh run.sh start workers [COUNT]
+sh run.sh start worker NAME
+sh run.sh stop
+sh run.sh stop server
+sh run.sh stop workers
+sh run.sh stop worker NAME
+sh run.sh restart
+sh run.sh status
+sh run.sh logs [server|WORKER_NAME]
+```
+
+### Multiple workers on one GPU
+
+Set `WORKER_COUNT` to run multiple independent worker processes against
+the same locally detected CUDA or XPU device:
+
+``` sh
+GRADMESH_WORKER_COUNT=3 GRADMESH_WORKER_BACKEND=cuda sh run.sh start
+```
+
+Or add individually named workers:
+
+``` sh
+sh run.sh start server
+GRADMESH_WORKER_BACKEND=xpu sh run.sh start worker arc-test-1
+GRADMESH_WORKER_BACKEND=xpu sh run.sh start worker arc-test-2
+```
+
+Each managed worker receives a stable, unique node ID based on its name,
+its own PID file, and its own log. Starting the same name twice is
+idempotent; the script reports the already-running process instead of
+creating a duplicate.
+
+All workers on one machine still share the same physical GPU and VRAM.
+They are separate scheduler participants, not isolated GPU partitions.
+Use a conservative `MAX_BATCH_SIZE`—usually `1` while testing—and watch
+GPU memory to avoid oversubscription:
+
+``` sh
+GRADMESH_WORKER_COUNT=3 GRADMESH_WORKER_BACKEND=cuda GRADMESH_MAX_BATCH_SIZE=1 sh run.sh start
+```
+
+Useful configuration variables:
+
+``` text
+GRADMESH_PYTHON           Python executable; auto-detects .venv when unset
+GRADMESH_HOST             Coordinator bind address (default: 0.0.0.0)
+GRADMESH_PORT             Coordinator port (default: 8000)
+GRADMESH_SERVER_URL       URL workers use (default: http://127.0.0.1:$GRADMESH_PORT)
+GRADMESH_WORKER_COUNT     Workers started by `start` (default: 1)
+GRADMESH_WORKER_BACKEND   auto, cuda, xpu, or cpu (default: auto)
+GRADMESH_MAX_BATCH_SIZE   Per-worker advertised batch limit (default: 2)
+GRADMESH_HEARTBEAT_SECONDS Worker heartbeat interval (default: 5)
+GRADMESH_POLL_SECONDS     Worker work-poll interval (default: 1.5)
+GRADMESH_RUNTIME_DIR      Optional PID/log directory override
+```
+
+For workers on other computers, run `run.sh` on each machine with the
+coordinator's LAN URL:
+
+``` sh
+GRADMESH_SERVER_URL=http://HOST_IP:8000 GRADMESH_WORKER_BACKEND=cuda sh run.sh start worker remote-3050
+```
+
+`run.sh stop` only stops processes recorded in its own runtime directory;
+it does not kill unrelated Python or GPU processes.
+
 ## Distributed Training Model
 
 The current implementation uses **round-synchronized training**, not
@@ -438,6 +532,7 @@ The exact request/response schema in `server.py` is the source of truth.
 
 ``` text
 GradMesh/
+├── run.sh
 ├── server.py
 ├── worker.py
 ├── client.py
@@ -468,6 +563,7 @@ GradMesh/
 -   [x] Browser dashboard
 -   [x] LAN worker connectivity
 -   [x] Training output handling
+-   [x] Coordinator/worker process manager
 
 ### Validation in Progress
 

@@ -37,8 +37,8 @@ if __name__ == "__main__":
                 gpu_name = node.get("gpu", "").split()[-1] if node.get("gpu") else "unknown"
                 print(f"  {node.get('display_name') or node_id[:8]}: {gpu_name} | Load: {node.get('load', 0):.1f} | Active: {node.get('active_batches', 0)} | Completed: {node.get('completed_batches', 0)}")
             
-            if status['status'] == "done":
-                print("\n✓ Training completed!")
+            if status['status'] in {"done", "failed", "cancelled"}:
+                print(f"\nTraining finished with status: {status['status']}")
                 print(f"Total time: {elapsed}s")
                 break
             

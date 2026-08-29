@@ -283,6 +283,10 @@ def submit_training_job(args: argparse.Namespace) -> None:
             print("training job failed")
             break
 
+        if status["status"] == "cancelled":
+            print("training job cancelled")
+            break
+
         time.sleep(args.poll_seconds)
 
 

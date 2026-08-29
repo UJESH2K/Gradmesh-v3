@@ -53,6 +53,7 @@ THROUGHPUT_BATCH_LIMIT = 8
 DEFAULT_ESTIMATED_MEMORY_MB = 2048
 TRAINING_JOB_DIR = Path(os.getenv("TRAINING_JOB_DIR", str(BASE_DIR / "training_jobs")))
 TRAINING_JOB_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR = Path(os.getenv("GRADMESH_RESULTS_DIR", str(BASE_DIR / "weights"))).expanduser().resolve()
 
 
 class RegisterNodeRequest(BaseModel):
@@ -110,6 +111,11 @@ class SubmitTrainingBatchFailureRequest(BaseModel):
     node_id: str
     batch_id: str
     error: str = Field(..., min_length=1)
+
+
+class AcknowledgeTrainingCancellationRequest(BaseModel):
+    node_id: str
+    batch_id: str
 
 
 class SubmitBatchResultItem(BaseModel):
@@ -178,7 +184,7 @@ def _release_batch_locked(batch_id: str, requeue: bool = False) -> None:
 
 def _release_training_batch_locked(batch_id: str, requeue: bool = False) -> None:
     batch = training_batches.get(batch_id)
-    if batch is None or batch.get("status") not in {"assigned", "running", "queued", "done"}:
+    if batch is None or batch.get("status") not in {"assigned", "running", "queued", "done", "cancelling"}:
         return
 
     node_id = batch["node_id"]
@@ -193,6 +199,20 @@ def _release_training_batch_locked(batch_id: str, requeue: bool = False) -> None
     # scheduler only selects batches whose status is exactly "queued".
     batch["status"] = "queued" if requeue else "done"
     batch["finished_at"] = time.time()
+
+
+def _finish_training_cancellation_locked(job_id: str) -> None:
+    """Move a cancelling job to cancelled once no worker still owns its work."""
+    job = training_jobs[job_id]
+    if job.get("status") != "cancelling":
+        return
+    active = any(
+        batch["job_id"] == job_id and batch.get("status") in {"assigned", "running", "cancelling"}
+        for batch in training_batches.values()
+    )
+    if not active:
+        job["status"] = "cancelled"
+        job["finished_at"] = time.time()
 
 
 def _fail_training_batch_locked(batch_id: str, message: str) -> None:
@@ -227,7 +247,7 @@ def _requeue_stale_batches_locked(now: float) -> None:
 
 def _requeue_stale_training_batches_locked(now: float) -> None:
     for batch_id, batch in list(training_batches.items()):
-        if batch["status"] not in {"assigned", "running"}:
+        if batch["status"] not in {"assigned", "running", "cancelling"}:
             continue
 
         node_id = batch["node_id"]
@@ -235,7 +255,11 @@ def _requeue_stale_training_batches_locked(now: float) -> None:
         lease_expired = (now - assigned_at) > TRAINING_BATCH_LEASE_TIMEOUT_SECONDS
         node_inactive = node_id not in nodes or not nodes[node_id]["active"]
 
-        if lease_expired or node_inactive:
+        if (lease_expired or node_inactive) and batch["status"] == "cancelling":
+            _release_training_batch_locked(batch_id, requeue=False)
+            batch["status"] = "cancelled"
+            _finish_training_cancellation_locked(batch["job_id"])
+        elif lease_expired or node_inactive:
             _release_training_batch_locked(batch_id, requeue=True)
             training_queue.appendleft(batch_id)
 
@@ -419,6 +443,8 @@ def _training_weights_url(job_id: str) -> str:
 
 def _enqueue_training_round_locked(job_id: str) -> None:
     job = training_jobs[job_id]
+    if job.get("status") in {"cancelling", "cancelled", "done", "failed"}:
+        return
     round_index = job["current_round"]
     shards = job["shards"]
 
@@ -455,6 +481,8 @@ def _enqueue_training_round_locked(job_id: str) -> None:
 
 def _finalize_training_round_locked(job_id: str) -> None:
     job = training_jobs[job_id]
+    if job.get("status") != "running":
+        return
     round_index = job["current_round"]
     round_batches = [
         batch
@@ -502,7 +530,14 @@ def _update_training_job_status_locked(job_id: str) -> None:
     job["completed_batches"] = done_count
     job["pending_batches"] = pending_count
 
-    if job.get("status") in {"done", "failed"}:
+    if job.get("status") in {"done", "failed", "cancelled"}:
+        return
+
+    if job.get("status") == "cancelling":
+        _finish_training_cancellation_locked(job_id)
+        return
+
+    if job.get("status") == "queued" and assigned_count == 0 and done_count == 0 and failed_count == 0:
         return
 
     if failed_count > 0 and pending_count == 0 and assigned_count == 0:
@@ -522,7 +557,7 @@ def _pop_training_batch_from_queue_locked(node: dict) -> Optional[dict]:
             continue
 
         job = training_jobs.get(batch["job_id"])
-        if job is None or job.get("status") in {"done", "failed"}:
+        if job is None or job.get("status") not in {"queued", "running"}:
             continue
         if not node.get("supports_training", True):
             continue
@@ -543,6 +578,7 @@ def _pop_training_batch_from_queue_locked(node: dict) -> Optional[dict]:
         nodes[node["node_id"]]["active_batches"] += 1
         nodes[node["node_id"]]["last_batch_size"] = 1
         nodes[node["node_id"]]["last_batch_model"] = job["base_model"]
+        job["status"] = "running"
         training_queue.remove(batch_id)
         return {
             "batch_id": batch_id,
@@ -584,6 +620,8 @@ def _network_manifest() -> dict:
             "training_status": "/training_status/{job_id}",
             "training_shard": "/training_jobs/{job_id}/shards/{shard_index}.zip",
             "training_weights": "/training_jobs/{job_id}/weights",
+            "cancel_training": "/training_jobs/{job_id}/cancel",
+            "training_batch_status": "/training_batches/{batch_id}/status",
             "model": "/models/{model_name}",
             "nodes": "/nodes",
             "metrics": "/metrics",
@@ -758,6 +796,70 @@ def submit_training_job(req: SubmitTrainingJobRequest):
     }
 
 
+@app.post("/training_jobs/{job_id}/cancel")
+def cancel_training_job(job_id: str):
+    with state_lock:
+        job = training_jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown training job")
+        if job["status"] in {"done", "failed", "cancelled"}:
+            return {"job_id": job_id, "status": job["status"], "changed": False}
+        if job["status"] == "cancelling":
+            _finish_training_cancellation_locked(job_id)
+            return {"job_id": job_id, "status": job["status"], "changed": False}
+
+        job["status"] = "cancelling"
+        job["cancel_requested_at"] = job.get("cancel_requested_at") or time.time()
+        queued_ids = {
+            batch_id
+            for batch_id, batch in training_batches.items()
+            if batch["job_id"] == job_id and batch.get("status") == "queued"
+        }
+        if queued_ids:
+            training_queue_copy = [batch_id for batch_id in training_queue if batch_id not in queued_ids]
+            training_queue.clear()
+            training_queue.extend(training_queue_copy)
+        for batch_id, batch in training_batches.items():
+            if batch["job_id"] != job_id:
+                continue
+            if batch.get("status") == "queued":
+                batch["status"] = "cancelled"
+                batch["finished_at"] = time.time()
+            elif batch.get("status") in {"assigned", "running"}:
+                batch["status"] = "cancelling"
+        _finish_training_cancellation_locked(job_id)
+        return {"job_id": job_id, "status": job["status"], "changed": True}
+
+
+@app.get("/training_batches/{batch_id}/status")
+def training_batch_status(batch_id: str, node_id: Optional[str] = None):
+    with state_lock:
+        batch = training_batches.get(batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="Unknown training batch")
+        if node_id is not None and batch.get("node_id") != node_id:
+            raise HTTPException(status_code=409, detail="Batch is not assigned to this node")
+        job = training_jobs[batch["job_id"]]
+        return {"batch_id": batch_id, "status": batch["status"], "job_status": job["status"], "cancel_requested": job["status"] in {"cancelling", "cancelled"}}
+
+
+@app.post("/training_batches/{batch_id}/cancelled")
+def acknowledge_training_cancellation(batch_id: str, req: AcknowledgeTrainingCancellationRequest):
+    with state_lock:
+        batch = training_batches.get(batch_id)
+        if batch is None:
+            raise HTTPException(status_code=404, detail="Unknown training batch")
+        if req.batch_id != batch_id or batch.get("node_id") != req.node_id:
+            raise HTTPException(status_code=409, detail="Batch is not assigned to this node")
+        job = training_jobs[batch["job_id"]]
+        if job["status"] not in {"cancelling", "cancelled"}:
+            raise HTTPException(status_code=409, detail="Training job is not being cancelled")
+        _release_training_batch_locked(batch_id, requeue=False)
+        batch["status"] = "cancelled"
+        _finish_training_cancellation_locked(batch["job_id"])
+        return {"batch_id": batch_id, "status": "cancelled", "job_status": job["status"]}
+
+
 @app.get("/get_batch/{node_id}")
 def get_batch(node_id: str):
     with state_lock:
@@ -849,6 +951,11 @@ def submit_training_round_result(req: SubmitTrainingRoundResultRequest):
             raise HTTPException(status_code=409, detail="Batch is not assigned to this node")
         if batch["round_index"] != req.round_index:
             raise HTTPException(status_code=400, detail="round_index does not match batch")
+        job = training_jobs[batch["job_id"]]
+        if job.get("status") in {"cancelling", "cancelled"}:
+            return {"status": "ignored", "reason": "job_cancelled", "batch_id": req.batch_id}
+        if job.get("status") in {"done", "failed"} or batch.get("status") not in {"assigned", "running"}:
+            return {"status": "ignored", "reason": "stale_result", "batch_id": req.batch_id}
 
         batch["weights_b64"] = req.weights_b64
         batch["metrics"] = req.metrics
@@ -869,6 +976,12 @@ def submit_training_batch_failure(req: SubmitTrainingBatchFailureRequest):
             raise HTTPException(status_code=404, detail="Unknown batch_id")
         if batch.get("node_id") != req.node_id:
             raise HTTPException(status_code=409, detail="Batch is not assigned to this node")
+        job = training_jobs[batch["job_id"]]
+        if job.get("status") in {"cancelling", "cancelled"}:
+            _release_training_batch_locked(req.batch_id, requeue=False)
+            batch["status"] = "cancelled"
+            _finish_training_cancellation_locked(batch["job_id"])
+            return {"status": "ignored", "reason": "job_cancelled", "batch_id": req.batch_id}
         _fail_training_batch_locked(req.batch_id, req.error)
         _update_training_job_status_locked(batch["job_id"])
     return {"status": "recorded", "batch_id": req.batch_id}
@@ -986,6 +1099,17 @@ def training_weights(job_id: str):
             "weights_b64": job.get("current_weights_b64"),
             "round": job["current_round"],
         }
+
+
+@app.get("/weights/{filename}", include_in_schema=False)
+def comparison_result_file(filename: str):
+    """Serve existing JSON artifacts without implying that evaluation ran."""
+    if Path(filename).name != filename or not filename.lower().endswith(".json"):
+        raise HTTPException(status_code=404, detail="Unknown result file")
+    result_path = (RESULTS_DIR / filename).resolve()
+    if result_path.parent != RESULTS_DIR or not result_path.is_file():
+        raise HTTPException(status_code=404, detail="Result file not found")
+    return FileResponse(result_path, media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/models/{model_name:path}")

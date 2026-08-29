@@ -6,7 +6,6 @@
 <title>GPU Federation Console — Training Comparison</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
   :root{
@@ -96,6 +95,7 @@
   .btn:hover{border-color:var(--text-faint);}
   .btn-primary{background:var(--amber); color:#0B1016; border-color:var(--amber);}
   .btn-primary:hover{filter:brightness(1.08);}
+  .btn-stop{color:var(--red); border-color:var(--red); display:none;}
   .btn:disabled{opacity:.45; cursor:not-allowed;}
   .hint{font-family:var(--mono); font-size:10.5px; color:var(--text-faint); line-height:1.5; margin-top:2px;}
 
@@ -246,6 +246,7 @@
     <hr class="rule">
 
     <button class="btn btn-primary" id="startBtn">▶ Compare</button>
+    <button class="btn btn-stop" id="cancelBtn">Stop active training</button>
     <div class="hint" id="startHint">Fetches strawberry_dataset.zip, runs the 1-worker job then the 2-worker job — same sequence as run_weight_jobs.py. Press Enter anywhere in this panel to run it too.</div>
     <div id="startError" style="display:none; font-family:var(--mono); font-size:11.5px; color:var(--red); background:rgba(226,96,79,.08); border:1px solid var(--red); border-radius:var(--radius); padding:8px 10px; margin-top:8px;"></div>
 
@@ -254,7 +255,7 @@
     <div class="section-label">Evaluation Results</div>
     <div class="field">
       <label>Results JSON URL</label>
-      <input type="text" id="resultsUrl" placeholder="http://127.0.0.1:8000/weights/comparison_results.json">
+      <input type="text" id="resultsUrl" value="/weights/comparison_intel.json" placeholder="/weights/comparison_results.json">
     </div>
     <button class="btn" id="fetchResultsBtn">Fetch evaluation metrics</button>
     <div class="hint">Precision / recall / mAP come from the server-side YOLO validation pass (comparison_results.json) — a browser can't run that model itself, so point this at wherever the coordinator serves it.</div>
@@ -308,6 +309,7 @@
       </div>
     </div>
 
+    <div id="evalUnavailable" class="panel" style="display:block; color:var(--text-dim);">Evaluation metrics not available for this run. Validation results can be loaded separately when they exist.</div>
     <div id="evalSection" style="display:none;">
       <div class="section-label">Evaluation metrics</div>
       <div class="panel">
@@ -331,9 +333,32 @@
 </div>
 
 <script>
+/* Built-in canvas chart renderer: local dashboards no longer depend on a
+   third-party CDN defining a global Chart object. */
+class Chart {
+  constructor(canvas, config){ this.canvas=canvas; this.config=config; this.draw(); }
+  destroy(){ this.canvas.getContext('2d').clearRect(0,0,this.canvas.width,this.canvas.height); }
+  draw(){
+    const canvas=this.canvas, box=canvas.parentElement.getBoundingClientRect();
+    canvas.width=Math.max(320,Math.floor(box.width-28)); canvas.height=240;
+    const c=canvas.getContext('2d'), data=this.config.data||{}, sets=data.datasets||[], styles=getComputedStyle(document.documentElement);
+    c.font='12px IBM Plex Mono, monospace';
+    const values=sets.flatMap(s=>(s.data||[]).flatMap(v=>typeof v==='number'?[v]:v&&typeof v.y==='number'?[v.y]:[]));
+    const max=Math.max(1,...values.filter(Number.isFinite))*1.12, left=52, top=18, bottom=38, width=canvas.width-left-12, height=canvas.height-top-bottom;
+    c.strokeStyle=styles.getPropertyValue('--border'); c.beginPath(); c.moveTo(left,top); c.lineTo(left,top+height); c.lineTo(left+width,top+height); c.stroke();
+    if(this.config.type==='scatter'){
+      const points=sets.flatMap(s=>s.data||[]), maxX=Math.max(1,...points.map(p=>p.x||0))*1.1;
+      sets.forEach(s=>(s.data||[]).forEach(p=>{c.beginPath();c.fillStyle=s.backgroundColor||'#49C6B5';c.arc(left+(p.x/maxX)*width,top+height-(p.y/max)*height,6,0,Math.PI*2);c.fill();c.fillText(s.label||'',left+(p.x/maxX)*width+8,top+height-(p.y/max)*height);}));
+      return;
+    }
+    const labels=data.labels||[], groups=Math.max(1,sets.length), slot=width/Math.max(1,labels.length), bar=Math.min(54,(slot-16)/groups);
+    labels.forEach((label,i)=>{c.fillStyle=styles.getPropertyValue('--text-dim');c.textAlign='center';c.fillText(String(label),left+slot*(i+.5),canvas.height-14);});
+    sets.forEach((s,j)=>(s.data||[]).forEach((v,i)=>{if(!Number.isFinite(v))return;const x=left+slot*i+(slot-bar*groups)/2+j*bar,y=top+height-(v/max)*height;c.fillStyle=Array.isArray(s.backgroundColor)?s.backgroundColor[i%s.backgroundColor.length]:s.backgroundColor;c.fillRect(x,y,bar-3,top+height-y);c.fillStyle=styles.getPropertyValue('--text');c.textAlign='center';c.fillText(Number(v).toFixed(2),x+(bar-3)/2,Math.max(12,y-5));}));
+  }
+}
 (function(){
   const $ = (id) => document.getElementById(id);
-  const state = { theme: 'dark', comparison: null, charts: {}, running: false };
+  const state = { theme: 'dark', comparison: null, charts: {}, running: false, cancelRequested: false, activeJobId: null, activeStage: null };
 
   window.addEventListener('beforeunload', (e) => {
     if(state.running){
@@ -606,6 +631,7 @@
     setStage(idx, 'waiting', 'active', `waiting for ${required} active worker(s)...`);
     const start = Date.now();
     while(true){
+      if(state.cancelRequested) throw new Error('Comparison cancelled; the next job was not started.');
       const data = await httpGet('/nodes');
       renderNodes(data.nodes || {});
       const active = Object.values(data.nodes||{}).filter(n => n.active && n.supports_training !== false);
@@ -632,6 +658,8 @@
       class_names: ['object'],
     });
     const jobId = submitRes.job_id;
+    state.activeJobId = jobId;
+    state.activeStage = idx;
     log(`job_id=${jobId}`);
     setStage(idx, 'training', 'active', `job ${jobId.slice(0,8)}…`);
 
@@ -642,10 +670,17 @@
       const workers = p.workers || [];
       const workerTxt = workers.map(w => `${w.display_name || (w.node_id||'').slice(0,8)}: epoch ${w.epoch||0}/${w.total_epochs||0}`).join(', ') || 'no active worker';
       $('round-'+idx).textContent = `${p.round ?? '—'}/${p.total_rounds ?? '—'}`;
-      setStage(idx, status.status, 'active', `done ${p.done ?? 0}/${p.total ?? 0} · ${workerTxt}`);
+      const pillClass = status.status === 'cancelled' ? 'failed' : 'active';
+      setStage(idx, status.status, pillClass, `done ${p.done ?? 0}/${p.total ?? 0} · ${workerTxt}`);
       log(`job=${jobId.slice(0,8)} status=${status.status} round=${p.round}/${p.total_rounds} done=${p.done}/${p.total}`);
 
       if(status.status === 'done') break;
+      if(status.status === 'cancelling') state.cancelRequested = true;
+      if(status.status === 'cancelled'){
+        stopTimer(idx);
+        setStage(idx, 'cancelled', 'failed', 'Training stopped. No later comparison stage will start.');
+        throw new Error('Comparison cancelled; the next job was not started.');
+      }
       if(status.status === 'failed'){
         stopTimer(idx);
         const detail = (status.errors||[]).map(String).join(' | ') || 'No worker error reported.';
@@ -669,6 +704,8 @@
     link.classList.remove('disabled');
 
     setStage(idx, 'done', 'done', `saved ${fileName}`);
+    state.activeJobId = null;
+    state.activeStage = null;
     log(`Saved weights → ${fileName}`);
     return { jobId, elapsedSeconds: elapsedMs/1000, fileName };
   }
@@ -686,6 +723,10 @@
     if(startBtn.disabled) return;
     startBtn.disabled = true;
     state.running = true;
+    state.cancelRequested = false;
+    state.activeJobId = null;
+    $('cancelBtn').style.display = 'block';
+    $('cancelBtn').disabled = false;
     showStartError(null);
     $('summarySection').style.display = 'none';
     [1,2].forEach(idx => { setStage(idx, 'idle', 'idle', '—'); $('round-'+idx).textContent = '—'; $('elapsed-'+idx).textContent = '00:00.0'; });
@@ -735,10 +776,29 @@
     }finally{
       startBtn.disabled = false;
       state.running = false;
+      state.activeJobId = null;
+      state.activeStage = null;
+      $('cancelBtn').style.display = 'none';
     }
   }
 
   $('startBtn').addEventListener('click', runComparison);
+  $('cancelBtn').addEventListener('click', async () => {
+    if(!state.running || state.cancelRequested) return;
+    state.cancelRequested = true;
+    const button = $('cancelBtn');
+    button.disabled = true;
+    button.textContent = 'Stopping…';
+    if(state.activeStage) setStage(state.activeStage, 'cancelling', 'active', 'Cancellation requested…');
+    try{
+      if(state.activeJobId) await httpPost(`/training_jobs/${state.activeJobId}/cancel`, {});
+      log(state.activeJobId ? `Cancellation requested for job=${state.activeJobId.slice(0,8)}` : 'Comparison stopped before another job was submitted.', 'warn');
+    }catch(err){
+      state.cancelRequested = false;
+      button.disabled = false;
+      log(`Cancellation failed: ${err.message}`, 'err');
+    }
+  });
   document.querySelector('.sidebar').addEventListener('keydown', (e) => {
     if(e.key === 'Enter'){
       e.preventDefault();
@@ -751,6 +811,7 @@
     $('sumT1').textContent = c.one_worker_seconds.toFixed(2) + ' s';
     $('sumT2').textContent = c.two_worker_seconds.toFixed(2) + ' s';
     $('sumSpeedup').textContent = c.speedup.toFixed(2) + 'x';
+    $('evalUnavailable').style.display = 'block';
 
     if(state.charts.trainTime) state.charts.trainTime.destroy();
     state.charts.trainTime = new Chart($('trainTimeChart'), {
@@ -781,17 +842,27 @@
       const res = await fetch(url);
       if(!res.ok) throw new Error(`HTTP ${res.status}`);
       const payload = await res.json();
-      const rows = payload.results || payload; // tolerate either {results:[...]} or a raw array
-      renderEval(Array.isArray(rows) ? rows : []);
-      log('Evaluation results loaded.');
+      const timing = payload.timings || payload;
+      if(timing.one_worker_seconds != null && timing.two_worker_seconds != null) renderSummary(timing);
+      const rows = payload.results || (Array.isArray(payload) ? payload : []);
+      if(Array.isArray(rows) && rows.length){ renderEval(rows); log('Evaluation results loaded.'); }
+      else { showEvaluationUnavailable(payload.validation_executed === false ? 'Validation was not executed.' : 'Evaluation metrics not available for this run.'); log('Performance results loaded; evaluation metrics are unavailable.', 'warn'); }
     }catch(err){
-      log(`Failed to load results: ${err.message}`, 'err');
+      showEvaluationUnavailable(`Evaluation metrics unavailable (${err.message}).`);
+      log(`Evaluation results unavailable: ${err.message}`, 'warn');
     }
   });
+
+  function showEvaluationUnavailable(message){
+    $('evalSection').style.display = 'none';
+    $('evalUnavailable').style.display = 'block';
+    $('evalUnavailable').textContent = message;
+  }
 
   function renderEval(rows){
     if(!rows.length){ log('Results JSON contained no rows.', 'warn'); return; }
     $('evalSection').style.display = 'block';
+    $('evalUnavailable').style.display = 'none';
 
     const table = $('metricsTable');
     const cols = ['label','weight','train_time','eval_time','precision','recall','map50','map50_95','inference_ms'].filter(c => rows[0].hasOwnProperty(c));
