@@ -219,7 +219,7 @@
     </div>
     <div class="field">
       <label>Base model</label>
-      <input type="text" id="baseModel" value="yolov8n.pt">
+      <input type="text" id="baseModel" value="yolov8n-obb.pt">
     </div>
     <div class="field-row">
       <div class="field">
@@ -238,7 +238,7 @@
       </div>
       <div class="field">
         <label>Max images (0=full)</label>
-        <input type="number" id="maxImages" value="20" min="0">
+        <input type="number" id="maxImages" value="0" min="0">
       </div>
     </div>
     <div class="hint">Max images &gt; 0 trims to the first N sorted train images, same as create_limited_dataset_zip / discover_yolo_split_dirs. Set to 0 to send the full ZIP untouched.</div>
@@ -513,12 +513,11 @@
 
   // Port of discover_yolo_split_dirs.
   function discoverSplitDirs(files, explicitDirs){
-    const rootPrefix = discoverRoot(files, explicitDirs);
-    const scopedFiles = rootPrefix ? files.filter(f => f === rootPrefix || f.startsWith(rootPrefix + '/')) : files;
-    const dirs = ancestorDirs(scopedFiles);
-    explicitDirs.forEach(d => {
-      if(!rootPrefix || d === rootPrefix || d.startsWith(rootPrefix + '/')) dirs.add(d);
-    });
+    // _find_dir_with_suffix uses rglob() on the Python side, so search every
+    // directory in the archive. This also handles ZIPs with a wrapper folder
+    // such as dota8/ and archives that omit explicit directory entries.
+    const dirs = ancestorDirs(files);
+    explicitDirs.forEach(d => dirs.add(d));
 
     const trainImages = findDirWithSuffix(dirs, 'images', 'train') || findDirWithSuffix(dirs, 'train', 'images');
     const trainLabels = findDirWithSuffix(dirs, 'labels', 'train') || findDirWithSuffix(dirs, 'train', 'labels');
@@ -530,7 +529,7 @@
   }
 
   // Port of create_limited_dataset_zip: first N sorted train images (+ matching labels if
-  // present), plus the full val split copied as-is into a "valid/" folder if one was found.
+  // present), plus the full val split copied into a supported "val/" folder.
   async function buildLimitedZip(file, maxImages){
     log(`Trimming dataset to the first ${maxImages} sorted train image(s), same as create_limited_dataset_zip...`);
     const zip = await JSZip.loadAsync(file);
@@ -562,12 +561,12 @@
       for(const f of valFiles){
         const relative = f.substring(split.valImages.length + 1);
         const data = await zip.files[f].async('uint8array');
-        out.file('valid/images/' + relative, data);
+        out.file('val/images/' + relative, data);
         const relNoExt = relative.replace(IMAGE_EXT, '.txt');
         const labelPath = split.valLabels + '/' + relNoExt;
         if(zip.files[labelPath]){
           const ldata = await zip.files[labelPath].async('uint8array');
-          out.file('valid/labels/' + relNoExt, ldata);
+          out.file('val/labels/' + relNoExt, ldata);
         }
       }
     }
@@ -698,7 +697,14 @@
       const maxImages = Number($('maxImages').value);
       let uploadFile = datasetFile;
       if(maxImages > 0){
-        uploadFile = await buildLimitedZip(datasetFile, maxImages);
+        try{
+          uploadFile = await buildLimitedZip(datasetFile, maxImages);
+        }catch(err){
+          // Trimming is only an optimization. The coordinator performs its own
+          // authoritative recursive YOLO dataset discovery when it receives the ZIP.
+          log(`Browser trimming skipped (${err.message}); submitting the original dataset ZIP.`, 'warn');
+          uploadFile = datasetFile;
+        }
       }
       const datasetZipB64 = await fileToB64(uploadFile);
       const datasetZipName = uploadFile.name;

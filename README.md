@@ -153,6 +153,36 @@ Future worker backends may support AMD/ROCm or Apple Silicon/MPS, but
 the first implementation should remain focused on NVIDIA/CUDA for
 predictable benchmarking.
 
+### Intel XPU worker
+
+Intel workers use native PyTorch XPU and a separate dependency profile so
+the CUDA requirements cannot replace the XPU build:
+
+``` powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-xpu.txt
+.\.venv\Scripts\python.exe test_accelerator.py --backend xpu
+```
+
+Start an Intel worker explicitly to prevent fallback:
+
+``` powershell
+.\.venv\Scripts\python.exe worker.py --server-url http://HOST_IP:8000 --name arc-worker --backend xpu
+```
+
+`ultralytics==8.4.46` rejects the strings `xpu` and `xpu:0`, so GradMesh
+passes a validated `torch.device("xpu:0")` through a small custom trainer.
+The initial XPU path disables AMP and final Ultralytics validation, and uses
+`foreach=False` for both Adam-family optimizers and gradient clipping. CUDA
+workers continue through the original Ultralytics trainer unchanged.
+
+Validation commands:
+
+``` powershell
+.\.venv\Scripts\python.exe validate_yolo_xpu.py
+.\.venv\Scripts\python.exe validate_gradmesh_xpu.py --rounds 3
+```
+
 ## LAN Setup
 
 ### Host

@@ -1,0 +1,6 @@
+# Intel XPU worker profile. The exact +xpu pins prevent replacement by CPU/CUDA wheels.
+--extra-index-url https://download.pytorch.org/whl/xpu
+-r requirements-common.txt
+torch==2.13.0+xpu
+torchvision==0.28.0+xpu
+

@@ -18,8 +18,10 @@ except Exception:
     YOLO = None
 
 from federated_training import decode_state_dict, encode_state_dict
+from accelerator import Accelerator, detect_accelerator
 
 torch = None
+ACCELERATOR: Accelerator | None = None
 
 
 # Global variables that can be overridden by CLI args or env vars
@@ -31,6 +33,7 @@ MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "4"))
 GPU_MEMORY_MB = int(os.getenv("GPU_MEMORY_MB", "24000"))
 PREFERRED_MODELS = [item.strip() for item in os.getenv("PREFERRED_MODELS", "").split(",") if item.strip()]
 DISPLAY_NAME = os.getenv("DISPLAY_NAME", None)
+BACKEND = os.getenv("BACKEND", "auto")
 
 
 def http_post(path: str, payload: dict, timeout: int = 10) -> dict:
@@ -83,13 +86,9 @@ def init_torch() -> None:
 
 
 def detect_gpu_profile() -> tuple[str, int]:
-    if torch is not None and torch.cuda.is_available():
-        try:
-            props = torch.cuda.get_device_properties(0)
-            return torch.cuda.get_device_name(0), int(props.total_memory / (1024 * 1024))
-        except Exception:
-            return "cuda", GPU_MEMORY_MB
-    return "cpu", GPU_MEMORY_MB
+    if ACCELERATOR is None:
+        raise RuntimeError("Accelerator has not been initialized")
+    return ACCELERATOR.device_name, ACCELERATOR.total_memory_mb
 
 
 def register_node(gpu_name: str, gpu_memory_mb: int, supports_training: bool) -> None:
@@ -110,7 +109,7 @@ def register_node(gpu_name: str, gpu_memory_mb: int, supports_training: bool) ->
 
 
 def current_load(active_batches: int = 0) -> float:
-    if torch is not None and torch.cuda.is_available():
+    if ACCELERATOR is not None and ACCELERATOR.supports_training:
         return 0.1 if active_batches == 0 else 0.9
     return 0.05 if active_batches == 0 else 0.8
 
@@ -149,7 +148,9 @@ def process_batch(batch: dict) -> list[dict]:
     adapter_name = batch.get("adapter_name") or "base"
 
     if torch is not None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        if ACCELERATOR is None:
+            raise RuntimeError("Accelerator has not been initialized")
+        device = ACCELERATOR.torch_device
         lengths = [len(text) for text in payloads]
         tensor = torch.tensor(lengths, dtype=torch.float32, device=device)
         features = torch.stack([tensor, tensor * 2.0, tensor.sqrt().clamp_min(1.0)], dim=1)
@@ -222,7 +223,9 @@ def train_batch(batch: dict) -> dict:
             }
             model.model.load_state_dict(compatible_state, strict=False)
 
-        device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
+        if ACCELERATOR is None:
+            raise RuntimeError("Accelerator has not been initialized")
+        device = ACCELERATOR.ultralytics_device
         total_epochs = int(batch.get("epochs", 1))
         allocated_memory_mb = int(batch.get("estimated_memory_mb", 0))
         send_heartbeat(
@@ -261,17 +264,23 @@ def train_batch(batch: dict) -> dict:
         heartbeat_thread = threading.Thread(target=keep_training_alive, daemon=True)
         heartbeat_thread.start()
         try:
-            model.train(
-                data=str(data_yaml),
-                epochs=total_epochs,
-                imgsz=int(batch.get("imgsz", 640)),
-                batch=int(batch.get("batch_size", 8)),
-                device=device,
-                project=str(temp_root / "runs"),
-                name=f"round_{batch.get('round_index', 0)}",
-                workers=0,
-                verbose=False,
-            )
+            train_options = {
+                "data": str(data_yaml),
+                "epochs": total_epochs,
+                "imgsz": int(batch.get("imgsz", 640)),
+                "batch": int(batch.get("batch_size", 8)),
+                "project": str(temp_root / "runs"),
+                "name": f"round_{batch.get('round_index', 0)}",
+                "workers": 0,
+                "verbose": False,
+            }
+            if ACCELERATOR.backend == "xpu":
+                from ultralytics_xpu import xpu_train
+
+                xpu_train(model, optimizer="Adam", val=False, plots=False, **train_options)
+            else:
+                # Preserve the existing CUDA/CPU Ultralytics call unchanged.
+                model.train(device=device, **train_options)
         finally:
             heartbeat_stop.set()
             heartbeat_thread.join(timeout=2)
@@ -285,7 +294,8 @@ def train_batch(batch: dict) -> dict:
             "weights_b64": encoded_weights,
             "metrics": {
                 "trained": True,
-                "device": device,
+                "device": str(ACCELERATOR.torch_device),
+                "backend": ACCELERATOR.backend,
                 "base_model": batch.get("base_model", "yolov8n-obb.pt"),
             },
         }
@@ -320,7 +330,7 @@ def submit_training_batch_failure(batch_id: str, exc: Exception) -> None:
 
 
 def main() -> None:
-    global SERVER_URL, POLL_SECONDS, HEARTBEAT_SECONDS, NODE_ID, MAX_BATCH_SIZE, GPU_MEMORY_MB, DISPLAY_NAME
+    global SERVER_URL, POLL_SECONDS, HEARTBEAT_SECONDS, NODE_ID, MAX_BATCH_SIZE, GPU_MEMORY_MB, DISPLAY_NAME, BACKEND, ACCELERATOR
     
     parser = argparse.ArgumentParser(description="GPU worker agent for distributed training")
     parser.add_argument("--server-url", default=SERVER_URL, help="Coordinator base URL")
@@ -330,6 +340,7 @@ def main() -> None:
     parser.add_argument("--max-batch-size", type=int, default=MAX_BATCH_SIZE, help="Maximum batch size")
     parser.add_argument("--gpu-memory-mb", type=int, default=GPU_MEMORY_MB, help="Advertised GPU memory in MB")
     parser.add_argument("--node-id", default=NODE_ID, help="Stable node ID")
+    parser.add_argument("--backend", choices=["auto", "cuda", "xpu", "cpu"], default=BACKEND, help="Accelerator backend")
     
     args = parser.parse_args()
     
@@ -341,13 +352,20 @@ def main() -> None:
     MAX_BATCH_SIZE = args.max_batch_size
     GPU_MEMORY_MB = args.gpu_memory_mb
     DISPLAY_NAME = args.name
+    BACKEND = args.backend
     
     init_torch()
+    if torch is None:
+        raise RuntimeError("PyTorch could not be imported")
+    ACCELERATOR = detect_accelerator(BACKEND, advertised_memory_mb=GPU_MEMORY_MB)
     gpu_name, gpu_memory_mb = detect_gpu_profile()
-    supports_training = gpu_name != "cpu"
-    print(f"[worker:{NODE_ID}] registering gpu='{gpu_name}' memory={gpu_memory_mb}MB at {SERVER_URL}")
+    supports_training = ACCELERATOR.supports_training
+    print(
+        f"[worker:{NODE_ID}] registering backend='{ACCELERATOR.backend}' "
+        f"gpu='{gpu_name}' memory={gpu_memory_mb}MB at {SERVER_URL}"
+    )
     if not supports_training:
-        print("[worker] CUDA GPU unavailable: this worker will not accept GPU training jobs. Run test_cuda.py and install a CUDA-enabled PyTorch build.")
+        print("[worker] no supported accelerator is available; this worker will not accept training jobs")
     register_node(gpu_name, gpu_memory_mb, supports_training=supports_training)
 
     last_heartbeat = 0.0

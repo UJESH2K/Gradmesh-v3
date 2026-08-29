@@ -1,0 +1,10 @@
+# Backend-neutral coordinator and worker runtime.
+fastapi
+uvicorn
+ultralytics==8.4.46
+requests
+pyyaml
+numpy
+opencv-python
+scipy
+

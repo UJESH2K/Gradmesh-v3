@@ -20,6 +20,9 @@ app = FastAPI(title="Local GPU Scheduler", version="1.0.0")
 
 BASE_DIR = Path(__file__).resolve().parent
 DASHBOARD_PATH = BASE_DIR / "dashboard.html"
+DATASET_ZIP_PATH = Path(
+    os.getenv("GRADMESH_DATASET_ZIP", str(BASE_DIR / "strawberry_dataset.zip"))
+).expanduser().resolve()
 
 app.add_middleware(
     CORSMiddleware,
@@ -48,7 +51,7 @@ FAST_BATCH_LIMIT = 2
 BALANCED_BATCH_LIMIT = 4
 THROUGHPUT_BATCH_LIMIT = 8
 DEFAULT_ESTIMATED_MEMORY_MB = 2048
-TRAINING_JOB_DIR = BASE_DIR / "training_jobs"
+TRAINING_JOB_DIR = Path(os.getenv("TRAINING_JOB_DIR", str(BASE_DIR / "training_jobs")))
 TRAINING_JOB_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -1037,7 +1040,27 @@ def network():
 def dashboard():
     if not DASHBOARD_PATH.exists():
         raise HTTPException(status_code=404, detail="dashboard.html not found")
-    return FileResponse(DASHBOARD_PATH)
+    return FileResponse(DASHBOARD_PATH, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/strawberry_dataset.zip", include_in_schema=False)
+def download_dashboard_dataset():
+    """Serve the dataset used by the browser dashboard's comparison workflow."""
+    if not DATASET_ZIP_PATH.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Dataset ZIP not found at {DATASET_ZIP_PATH}. "
+                "Place strawberry_dataset.zip beside server.py or set "
+                "GRADMESH_DATASET_ZIP before starting the coordinator."
+            ),
+        )
+    return FileResponse(
+        DATASET_ZIP_PATH,
+        media_type="application/zip",
+        filename="strawberry_dataset.zip",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/metrics")
